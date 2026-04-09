@@ -1,17 +1,15 @@
 import { useEffect, useState, useMemo } from "react";
-import { useParams, useNavigate, useLocation, useSearchParams } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import { 
   Loader2, ServerCrash, 
-  Copy, Maximize2, Check, Search, 
-  ChevronLeft, ChevronRight, Hash, Code2,
-  Download, ArrowUpDown, Trash2, Edit, Plus, Save, AlertTriangle, ChevronDown,
-  Database, RefreshCw, X, LayoutDashboard, Terminal,
-  Sun, Moon, Settings
+  Copy, Maximize2, Minimize, Check,
+  ChevronLeft, ChevronRight,
+  ArrowUpDown, Trash2, Edit, Save, AlertTriangle,
+  RefreshCw, X,
 } from "lucide-react";
-import { useTheme } from "@/context/ThemeContext";
 import { cn } from "@/lib/utils";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import {
   Table,
   TableBody,
@@ -33,29 +31,20 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
-  DialogFooter,
 } from "@/components/ui/dialog";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { 
-  Popover, 
-  PopoverContent, 
-  PopoverTrigger 
-} from "@/components/ui/popover";
+
 import { Textarea } from "@/components/ui/textarea";
 import { useSocket } from "@/context/SocketContext";
 
 export default function Explorer() {
-  const { theme, setTheme } = useTheme();
   const { socket } = useSocket();
   const { tableName: urlTableName } = useParams();
   const navigate = useNavigate();
-  const location = useLocation();
   const [searchParams] = useSearchParams();
   
   const [tablesList, setTablesList] = useState<string[]>([]);
@@ -252,11 +241,7 @@ export default function Explorer() {
     return () => document.body.classList.remove("zen-mode");
   }, [isZenMode]);
 
-  const forceRefresh = () => {
-    if (socket) {
-      socket.emit("subscribe", { tableName: urlTableName, page, pageSize });
-    }
-  };
+
 
   const copyToClipboard = (text: string, id: string) => {
     navigator.clipboard.writeText(text);

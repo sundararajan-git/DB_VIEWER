@@ -51,10 +51,12 @@ export default function DatabaseConfig() {
     setSuccess(null);
   };
 
-  const handleSelectChange = (value: string) => {
-    setFormData(prev => ({ ...prev, type: value }));
-    setError(null);
-    setSuccess(null);
+  const handleSelectChange = (value: string | null) => {
+    if (value) {
+      setFormData(prev => ({ ...prev, type: value }));
+      setError(null);
+      setSuccess(null);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {

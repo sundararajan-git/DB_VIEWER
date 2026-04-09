@@ -1,9 +1,7 @@
-import { useState, useCallback } from "react";
-import { motion } from "framer-motion";
+import { useState, useCallback, useEffect } from "react";
 import { 
-  Terminal, Cpu, Loader2, LayoutDashboard, Search, Download
+  Terminal, Cpu, Loader2, LayoutDashboard
 } from "lucide-react";
-import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -15,9 +13,8 @@ import {
 } from "@/components/ui/table";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import { useSocket } from "@/context/SocketContext";
-import { useEffect } from "react";
 
 export default function SqlLab() {
   const { socket } = useSocket();
