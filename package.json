@@ -1,0 +1,15 @@
+{
+  "name": "db-viewer-suite",
+  "version": "1.0.0",
+  "description": "Unified DB Viewer Suite with real-time WebSocket monitoring",
+  "scripts": {
+    "install:all": "npm install && cd backend && npm install && cd ../frontend && npm install",
+    "build:frontend": "cd frontend && npm run build",
+    "start:backend": "cd backend && npm start",
+    "start": "npm run build:frontend && npm run start:backend",
+    "dev": "npx concurrently \"cd backend && npm start\" \"cd frontend && npm run dev\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

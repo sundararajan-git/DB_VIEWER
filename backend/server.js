@@ -1,0 +1,561 @@
+require('dotenv').config();
+const express = require('express');
+const sql = require('mssql');
+const { Pool: PgPool } = require('pg');
+const cors = require('cors');
+const path = require('path');
+const http = require('http');
+const { Server } = require('socket.io');
+const fs = require('fs');
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: '*' } });
+
+const PORT = process.env.PORT || 4006;
+
+app.use(cors());
+app.use(express.json());
+
+// DB Configuration from local .env
+let dbConfig = {
+    type: process.env.DB_TYPE || 'mssql', // 'mssql' or 'postgres'
+    port: process.env.DB_PORT || '',
+    user: process.env.DB_USER || '',
+    password: process.env.DB_PASSWORD || '',
+    server: process.env.DB_SERVER || '',
+    database: process.env.DB_NAME || '',
+    options: {
+        encrypt: true,
+        trustServerCertificate: true,
+    },
+};
+
+let activeDbAdapter = null;
+
+// The DB Abstraction Layer
+class DBAdapter {
+    constructor(pool, type) {
+        this.pool = pool;
+        this.type = type;
+    }
+
+    async rawQuery(queryText) {
+        if (this.type === 'postgres') {
+            const res = await this.pool.query(queryText);
+            const rows = res.rows || [];
+            return { rows, columns: rows.length > 0 ? Object.keys(rows[0]) : [] };
+        } else {
+            const res = await this.pool.request().query(queryText);
+            const rows = res.recordset || [];
+            return { rows, columns: rows.length > 0 ? Object.keys(rows[0]) : [] };
+        }
+    }
+
+    async getTables() {
+        if (this.type === 'postgres') {
+            const res = await this.pool.query("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = 'public'");
+            return res.rows.map(r => r.table_name).sort();
+        } else {
+            const res = await this.pool.request().query("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'");
+            return res.recordset.map(r => r.TABLE_NAME).sort();
+        }
+    }
+
+    async getColumns(tableName) {
+        if (this.type === 'postgres') {
+            const res = await this.pool.query('SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position', [tableName.toLowerCase()]);
+            return res.rows.map(c => c.column_name);
+        } else {
+            const res = await this.pool.request().input('tableName', sql.NVarChar, tableName).query(`SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @tableName ORDER BY ORDINAL_POSITION`);
+            return res.recordset.map(c => c.COLUMN_NAME);
+        }
+    }
+
+    async getPrimaryKey(tableName) {
+        if (this.type === 'postgres') {
+            const query = `
+                SELECT a.attname AS "COLUMN_NAME" 
+                FROM pg_index i 
+                JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) 
+                WHERE i.indrelid = $1::regclass AND i.indisprimary
+            `;
+            try {
+                const res = await this.pool.query(query, [tableName.toLowerCase()]);
+                return res.rows.length > 0 ? res.rows[0].COLUMN_NAME : null;
+            } catch (e) { return null; }
+        } else {
+            const query = `
+                SELECT COLUMN_NAME
+                FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+                WHERE OBJECTPROPERTY(OBJECT_ID(CONSTRAINT_SCHEMA + '.' + CONSTRAINT_NAME), 'IsPrimaryKey') = 1
+                AND TABLE_NAME = @tableName
+            `;
+            const res = await this.pool.request().input('tableName', sql.NVarChar, tableName).query(query);
+            return res.recordset.length > 0 ? res.recordset[0].COLUMN_NAME : null;
+        }
+    }
+
+    async getTotalRows(tableName) {
+        if (this.type === 'postgres') {
+            const res = await this.pool.query(`SELECT COUNT(*) as total FROM "${tableName}"`);
+            return parseInt(res.rows[0].total);
+        } else {
+            const res = await this.pool.request().query(`SELECT COUNT(*) as total FROM [${tableName}]`);
+            return parseInt(res.recordset[0].total);
+        }
+    }
+
+    async getPaginatedRows(tableName, sortCol, offset, pageSize) {
+        if (this.type === 'postgres') {
+            const query = `SELECT * FROM "${tableName}" ORDER BY "${sortCol}" DESC LIMIT $1 OFFSET $2`;
+            const res = await this.pool.query(query, [pageSize, offset]);
+            return res.rows;
+        } else {
+            const query = `SELECT * FROM [${tableName}] ORDER BY [${sortCol}] DESC OFFSET ${offset} ROWS FETCH NEXT ${pageSize} ROWS ONLY`;
+            const res = await this.pool.request().query(query);
+            return res.recordset;
+        }
+    }
+
+    async deleteRow(tableName, primaryKey, pkValue) {
+        if (this.type === 'postgres') {
+            await this.pool.query(`DELETE FROM "${tableName}" WHERE "${primaryKey}" = $1`, [pkValue]);
+        } else {
+            await this.pool.request().input('pkValue', pkValue).query(`DELETE FROM [${tableName}] WHERE [${primaryKey}] = @pkValue`);
+        }
+    }
+
+    async truncateTable(tableName) {
+        if (this.type === 'postgres') {
+            await this.pool.query(`TRUNCATE TABLE "${tableName}" CASCADE`);
+        } else {
+            await this.pool.request().query(`TRUNCATE TABLE [${tableName}]`);
+        }
+    }
+
+    async updateRow(tableName, primaryKey, pkValue, updates) {
+        let cols = [];
+        let params = [];
+        let index = 1;
+
+        if (this.type === 'postgres') {
+            Object.entries(updates).forEach(([key, value]) => {
+                if (key === primaryKey) return;
+                cols.push(`"${key}" = $${index++}`);
+                params.push(value);
+            });
+            params.push(pkValue);
+            await this.pool.query(`UPDATE "${tableName}" SET ${cols.join(', ')} WHERE "${primaryKey}" = $${index}`, params);
+        } else {
+            const req = this.pool.request();
+            req.input('pkValue', pkValue);
+            Object.entries(updates).forEach(([key, value], i) => {
+                if (key === primaryKey) return;
+                const pName = `val${i}`;
+                cols.push(`[${key}] = @${pName}`);
+                req.input(pName, value);
+            });
+            await req.query(`UPDATE [${tableName}] SET ${cols.join(', ')} WHERE [${primaryKey}] = @pkValue`);
+        }
+    }
+
+    async createRow(tableName, data) {
+        let cols = [];
+        if (this.type === 'postgres') {
+            let place = [];
+            let params = [];
+            let index = 1;
+            Object.entries(data).forEach(([key, value]) => {
+                cols.push(`"${key}"`);
+                place.push(`$${index++}`);
+                params.push(value);
+            });
+            await this.pool.query(`INSERT INTO "${tableName}" (${cols.join(', ')}) VALUES (${place.join(', ')})`, params);
+        } else {
+            const req = this.pool.request();
+            let place = [];
+            Object.entries(data).forEach(([key, value], i) => {
+                const pName = `val${i}`;
+                cols.push(`[${key}]`);
+                place.push(`@${pName}`);
+                req.input(pName, value);
+            });
+            await req.query(`INSERT INTO [${tableName}] (${cols.join(', ')}) VALUES (${place.join(', ')})`);
+        }
+    }
+}
+
+async function getDb() {
+    if (!activeDbAdapter) throw new Error("Database not connected. Please configure via UI.");
+    return activeDbAdapter;
+}
+
+async function connectToDatabase(config) {
+    if (activeDbAdapter && activeDbAdapter.pool) {
+        try {
+            if (activeDbAdapter.type === 'postgres') await activeDbAdapter.pool.end();
+            else await activeDbAdapter.pool.close();
+        } catch(e) {}
+        activeDbAdapter = null;
+    }
+    
+    dbConfig = { ...dbConfig, ...config };
+    
+    if (!dbConfig.server || !dbConfig.user) {
+        throw new Error("Database not configured. Please configure via UI.");
+    }
+
+    try {
+        if (dbConfig.type === 'postgres') {
+            const pool = new PgPool({
+                user: dbConfig.user,
+                password: dbConfig.password,
+                host: dbConfig.server,
+                database: dbConfig.database,
+                port: parseInt(dbConfig.port) || 5432,
+                ssl: (dbConfig.server.includes('localhost') || dbConfig.server.includes('127.0.0.1')) ? false : { rejectUnauthorized: false }
+            });
+            await pool.query('SELECT NOW()'); // Test connection
+            activeDbAdapter = new DBAdapter(pool, 'postgres');
+        } else {
+            const pool = await new sql.ConnectionPool({
+                user: dbConfig.user,
+                password: dbConfig.password,
+                server: dbConfig.server,
+                database: dbConfig.database,
+                port: parseInt(dbConfig.port) || 1433,
+                options: dbConfig.options
+            }).connect();
+            activeDbAdapter = new DBAdapter(pool, 'mssql');
+        }
+        
+        console.log(`✅ Connected to ${dbConfig.type.toUpperCase()} Database`);
+        io.emit('db_connected', true);
+        return activeDbAdapter;
+    } catch(err) {
+        console.log(`❌ ${dbConfig.type.toUpperCase()} Database Connection Failed: `, err.message);
+        activeDbAdapter = null;
+        io.emit('db_error', err.message);
+        throw err;
+    }
+}
+
+// Initial connection attempt
+connectToDatabase(dbConfig).catch(() => {});
+
+// Admin Endpoints for Database Config
+app.post('/api/config', async (req, res) => {
+    try {
+        const { type, port, server, database, user, password } = req.body;
+        
+        // Test connection first
+        await connectToDatabase({ type, port, server, database, user, password });
+        
+        // Write to .env
+        const envPath = path.join(__dirname, '.env');
+        let envContent = '';
+        if (fs.existsSync(envPath)) {
+            envContent = fs.readFileSync(envPath, 'utf8');
+        }
+        
+        const updateEnv = (key, val) => {
+            const regex = new RegExp(`^${key}=.*`, 'm');
+            if (regex.test(envContent)) {
+                envContent = envContent.replace(regex, `${key}=${val}`);
+            } else {
+                envContent += `\n${key}=${val}`;
+            }
+        };
+        
+        updateEnv('DB_TYPE', type || 'mssql');
+        updateEnv('DB_PORT', port || '');
+        updateEnv('DB_SERVER', server);
+        updateEnv('DB_NAME', database);
+        updateEnv('DB_USER', user);
+        updateEnv('DB_PASSWORD', password);
+        
+        fs.writeFileSync(envPath, envContent.trim() + '\n');
+        
+        res.json({ success: true, message: 'Connected and saved successfully' });
+    } catch (err) {
+        res.status(500).json({ error: 'Connection failed: ' + err.message });
+    }
+});
+
+app.get('/api/config', (req, res) => {
+    res.json({
+        type: dbConfig.type || 'mssql',
+        port: dbConfig.port || '',
+        server: dbConfig.server || '',
+        database: dbConfig.database || '',
+        user: dbConfig.user || '',
+        isConfigured: !!(dbConfig.server && dbConfig.user)
+    });
+});
+
+app.post('/api/disconnect', async (req, res) => {
+    try {
+        if (activeDbAdapter) {
+            try {
+                if (activeDbAdapter.type === 'postgres') await activeDbAdapter.pool.end();
+                else await activeDbAdapter.pool.close();
+            } catch(e) {}
+            activeDbAdapter = null;
+        }
+        io.emit('db_error', 'Database disconnected manually.');
+        res.json({ success: true, message: 'Disconnected successfully.' });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to disconnect: ' + err.message });
+    }
+});
+
+const activeSubscriptions = new Map(); // Map<socketId, { tableName, page, pageSize }>
+
+io.on('connection', (socket) => {
+    console.log(`🔌 Client connected: ${socket.id}`);
+    
+    socket.on('get_tables', async () => {
+        try {
+            const db = await getDb();
+            const tables = await db.getTables();
+            socket.emit('tables_list', tables);
+        } catch (err) {
+            console.error('Failed to fetch tables:', err.message);
+            socket.emit('error', 'Failed to fetch tables: ' + err.message);
+        }
+    });
+
+    socket.on('subscribe', (config) => {
+        const { tableName, page = 1, pageSize = 50 } = typeof config === 'string' ? { tableName: config } : config;
+        
+        Array.from(socket.rooms).forEach(room => {
+            if (room !== socket.id) socket.leave(room);
+        });
+
+        const roomName = `${tableName}_p${page}_s${pageSize}`;
+        socket.join(roomName);
+        
+        activeSubscriptions.set(socket.id, { tableName, page, pageSize, roomName });
+        console.log(`📡 Client ${socket.id} watching ${tableName} (Page ${page}, Size ${pageSize})`);
+        
+        fetchAndBroadcastTable(tableName, page, pageSize, roomName);
+    });
+
+    socket.on('run_query', async (rawQuery) => {
+        try {
+            console.log(`🔍 Executing Raw Query from ${socket.id}: ${rawQuery.substring(0, 100)}...`);
+            const db = await getDb();
+            const { rows, columns } = await db.rawQuery(rawQuery);
+            
+            socket.emit('query_result', {
+                rows: rows.map(row => {
+                    const newRow = { ...row };
+                    for (const key in newRow) {
+                        if (Buffer.isBuffer(newRow[key])) {
+                            newRow[key] = `<Binary: ${newRow[key].length}B>`;
+                        } else if (newRow[key] instanceof Date) {
+                            newRow[key] = newRow[key].toISOString();
+                        }
+                    }
+                    return newRow;
+                }),
+                columns,
+                executedAt: new Date().toISOString()
+            });
+        } catch (err) {
+            console.error('❌ Raw Query Failed:', err.message);
+            socket.emit('error', 'SQL Lab Error: ' + err.message);
+        }
+    });
+
+    socket.on('delete_row', async ({ tableName, primaryKey, pkValue }) => {
+        try {
+            console.log(`🗑️ Deleting from ${tableName} where ${primaryKey} = ${pkValue}`);
+            const db = await getDb();
+            await db.deleteRow(tableName, primaryKey, pkValue);
+            
+            socket.emit('crud_success', { action: 'delete', tableName });
+            const sub = Array.from(activeSubscriptions.values()).find(s => s.tableName === tableName);
+            if (sub) fetchAndBroadcastTable(sub.tableName, sub.page, sub.pageSize, sub.roomName);
+        } catch (err) {
+            console.error('❌ Delete Failed:', err.message);
+            socket.emit('error', 'Delete Error: ' + err.message);
+        }
+    });
+    
+    socket.on('truncate_table', async ({ tableName }) => {
+        try {
+            console.log(`🧨 Purging all rows from ${tableName}`);
+            const db = await getDb();
+            await db.truncateTable(tableName);
+            
+            socket.emit('crud_success', { action: 'truncate', tableName });
+            
+            const sub = Array.from(activeSubscriptions.values()).find(s => s.tableName === tableName);
+            if (sub) fetchAndBroadcastTable(sub.tableName, sub.page, sub.pageSize, sub.roomName);
+        } catch (err) {
+            console.error('❌ Truncate Failed:', err.message);
+            socket.emit('error', 'Purge Error: ' + err.message);
+        }
+    });
+
+    socket.on('update_row', async ({ tableName, primaryKey, pkValue, updates }) => {
+        try {
+            console.log(`📝 Updating ${tableName} where ${primaryKey} = ${pkValue}`);
+            const db = await getDb();
+            await db.updateRow(tableName, primaryKey, pkValue, updates);
+            
+            socket.emit('crud_success', { action: 'update', tableName });
+            const sub = Array.from(activeSubscriptions.values()).find(s => s.tableName === tableName);
+            if (sub) fetchAndBroadcastTable(sub.tableName, sub.page, sub.pageSize, sub.roomName);
+        } catch (err) {
+            console.error('❌ Update Failed:', err.message);
+            socket.emit('error', 'Update Error: ' + err.message);
+        }
+    });
+
+    socket.on('create_row', async ({ tableName, data }) => {
+        try {
+            console.log(`➕ Creating new record in ${tableName}`);
+            const db = await getDb();
+            await db.createRow(tableName, data);
+            
+            socket.emit('crud_success', { action: 'create', tableName });
+            const sub = Array.from(activeSubscriptions.values()).find(s => s.tableName === tableName);
+            if (sub) fetchAndBroadcastTable(sub.tableName, sub.page, sub.pageSize, sub.roomName);
+        } catch (err) {
+            console.error('❌ Create Failed:', err.message);
+            socket.emit('error', 'Create Error: ' + err.message);
+        }
+    });
+
+    socket.on('disconnect', () => {
+        activeSubscriptions.delete(socket.id);
+        console.log(`🔌 Client disconnected: ${socket.id}`);
+    });
+});
+
+async function fetchAndBroadcastTable(tableName, page, pageSize, roomName) {
+    try {
+        const db = await getDb();
+        const offset = (page - 1) * pageSize;
+
+        // 1. Get column metadata
+        const columns = await db.getColumns(tableName);
+
+        // 2. Get total row count
+        const totalRows = await db.getTotalRows(tableName);
+
+        // 3. Get paginated rows
+        const lowerCols = columns.map(c => c.toLowerCase());
+        const timestampCol = columns.find(c => {
+            const lc = c.toLowerCase();
+            return lc.includes('created') || lc.includes('updated') || lc.includes('timestamp') || lc.includes('time') || lc.includes('date') || lc === 'dt';
+        });
+        const idCol = columns.find(c => {
+            const lc = c.toLowerCase();
+            return lc === 'id' || lc === 'uid' || lc.endsWith('_id');
+        });
+
+        let sortCol = timestampCol || idCol || columns[0] || 'id'; // fallback
+        
+        const rows = await db.getPaginatedRows(tableName, sortCol, offset, pageSize);
+        
+        // 4. Sanitize data
+        const sanitizedRows = rows.map(row => {
+            const newRow = { ...row };
+            for (const key in newRow) {
+                if (Buffer.isBuffer(newRow[key])) {
+                    newRow[key] = `<Binary Data: ${newRow[key].length} bytes>`;
+                } else if (newRow[key] instanceof Date) {
+                    newRow[key] = newRow[key].toISOString();
+                }
+            }
+            return newRow;
+        });
+        
+        io.to(roomName).emit('table_update', { 
+            rows: sanitizedRows, 
+            columns, 
+            tableName,
+            pagination: {
+                totalRows,
+                currentPage: page,
+                pageSize,
+                totalPages: Math.ceil(totalRows / pageSize)
+            }
+        });
+        console.log(`[Viewer-WS] Broadcasted ${sanitizedRows.length} rows to room ${roomName}`);
+    } catch (error) {
+        console.error(`Error querying ${tableName}:`, error.message);
+        io.to(roomName).emit('error', `Table [${tableName}]: ${error.message}`);
+    }
+}
+
+// Server-side continuous loop for active subscriptions
+setInterval(() => {
+    if (activeSubscriptions.size === 0) return;
+
+    const uniqueSubs = new Map();
+    activeSubscriptions.forEach((sub, socketId) => {
+        const socket = io.sockets.sockets.get(socketId);
+        if (!socket) {
+            activeSubscriptions.delete(socketId);
+            return;
+        }
+
+        const key = sub.roomName;
+        if (!uniqueSubs.has(key)) {
+            uniqueSubs.set(key, sub);
+        }
+    });
+
+    uniqueSubs.forEach(sub => {
+        const room = io.sockets.adapter.rooms.get(sub.roomName);
+        if (room && room.size > 0) {
+            fetchAndBroadcastTable(sub.tableName, sub.page, sub.pageSize, sub.roomName);
+        }
+    });
+}, 5000);
+
+// Serve static files from the frontend build
+const staticPath = path.join(__dirname, '../frontend/dist');
+app.use(express.static(staticPath));
+
+app.get('/api/tables', async (req, res) => {
+    try {
+        const db = await getDb();
+        const tables = await db.getTables();
+        res.json(tables);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/primary-key/:tableName', async (req, res) => {
+    try {
+        const db = await getDb();
+        let pk = await db.getPrimaryKey(req.params.tableName);
+        
+        if (!pk) {
+            // Fallback: search for columns like 'id', 'ID', etc.
+            const columns = await db.getColumns(req.params.tableName);
+            const colsLower = columns.map(c => c.toLowerCase());
+            const idCol = columns.find((c, idx) => colsLower[idx] === 'id' || colsLower[idx] === 'uid' || colsLower[idx].endsWith('_id'));
+            pk = idCol || null;
+        }
+        res.json({ primaryKey: pk });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.all('*', (req, res) => {
+    if (req.path.startsWith('/api')) return res.status(404).json({ error: 'Endpoint not found' });
+    res.sendFile(path.join(staticPath, 'index.html'));
+});
+
+server.listen(PORT, () => {
+    console.log(`🚀 Live WebSocket DB Viewer Suite running at http://localhost:${PORT}`);
+});
