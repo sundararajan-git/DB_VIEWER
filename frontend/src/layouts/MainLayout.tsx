@@ -1,13 +1,13 @@
 import React, { useState, useEffect } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
-import { 
-  Database, RefreshCw, Command as CommandIcon, 
+import {
+  Database, RefreshCw, Command as CommandIcon,
   LayoutDashboard, Terminal, Sun, Moon,
   Table as TableIcon, Search, Settings, Plus, Download,
-  Maximize, Trash2, DatabaseZap
+  Maximize, Trash2, DatabaseZap, BookOpen, Type
 } from "lucide-react";
-import { useTheme } from "@/context/ThemeContext";
+import { useTheme, FONT_LABELS, type AppFont } from "@/context/ThemeContext";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { 
@@ -18,19 +18,24 @@ import {
 import { 
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue 
 } from "@/components/ui/select";
-import { 
-  Popover, PopoverContent, PopoverTrigger 
-} from "@/components/ui/popover";
+import {
+  Dialog, DialogContent, DialogTrigger
+} from "@/components/ui/dialog";
+import { Filter } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useSocket } from "@/context/SocketContext";
+import { useAuth } from "@/context/AuthContext";
+import { apiFetch } from "@/lib/apiFetch";
+import { LogOut } from "lucide-react";
 
 interface MainLayoutProps {
   children: React.ReactNode;
 }
 
 export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
-  const { theme, setTheme } = useTheme();
+  const { theme, setTheme, font, setFont } = useTheme();
   const { isConnected } = useSocket();
+  const { authRequired, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -43,7 +48,7 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   const searchQuery = searchParams.get("q") || "";
 
   useEffect(() => {
-    fetch("/api/tables")
+    apiFetch("/api/tables")
       .then(res => {
         if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
         return res.json();
@@ -51,10 +56,6 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       .then(setTables)
       .catch(err => {
         console.error("MainLayout: Failed to fetch tables", err);
-        // If it's a completely new DB start or completely failing, they might need config
-        if (!tables.length && location.pathname !== '/config') {
-          navigate('/config');
-        }
       });
 
     const down = (e: KeyboardEvent) => {
@@ -70,16 +71,16 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
   const forceRefresh = () => {
     setIsSpinning(true);
     window.location.reload();
-    setTimeout(() => setIsSpinning(false), 500);
   };
 
   const navItems = [
     { name: "Explorer", path: "/explorer", icon: LayoutDashboard },
     { name: "SQL Lab", path: "/sql-lab", icon: Terminal },
+    { name: "Schema", path: "/schema", icon: BookOpen },
   ];
 
   return (
-    <div className="min-h-screen bg-background text-foreground font-sans selection:bg-foreground/5 flex flex-col antialiased">
+    <div className="h-screen bg-background text-foreground font-sans selection:bg-foreground/5 flex flex-col antialiased overflow-hidden">
       {/* Command Palette */}
       <CommandDialog open={cmdOpen} onOpenChange={setCmdOpen}>
         <Command className="rounded-none border-none shadow-none bg-transparent">
@@ -158,11 +159,11 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
                 value={selectedTable} 
                 onValueChange={(val) => navigate(`/explorer/${val}`)}
               >
-                <SelectTrigger className="w-75 h-7 rounded-lg bg-background border-none hover:bg-muted/30 transition-all font-bold uppercase text-[9px] tracking-widest px-3 shadow-sm">
+                <SelectTrigger className="w-72 h-7 rounded-lg bg-background border-none hover:bg-muted/30 transition-all font-bold uppercase text-[9px] tracking-widest px-3 shadow-sm">
                   <SelectValue placeholder="Table" />
                 </SelectTrigger>
-                <SelectContent className="rounded-xl border-foreground/10 bg-background/95 backdrop-blur-xl max-h-100">
-                  <ScrollArea className="h-75">
+                <SelectContent className="rounded-xl border-foreground/10 bg-background/95 backdrop-blur-xl max-h-96">
+                  <ScrollArea className="h-72">
                     <div className="p-2 space-y-1">
                       {tables.map(table => (
                         <SelectItem 
@@ -197,18 +198,18 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
         <div className="flex items-center gap-1.5">
           <div className={cn("size-2 rounded-full mr-2", isConnected ? "bg-success shadow-[0_0_8px_var(--success)] animate-pulse" : "bg-destructive")} title={isConnected ? "Operational" : "Offline"} />
           
-          <Popover>
-            <PopoverTrigger>
-              <Button 
-                variant="outline" 
+          <Dialog>
+            <DialogTrigger asChild>
+              <Button
+                variant="outline"
                 size="icon"
                 className="size-9 rounded-xl border-foreground/5 bg-background shadow-sm hover:bg-muted transition-all active:scale-90"
               >
                 <Settings className="size-4 opacity-60" />
               </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-60 p-2 rounded-2xl border-foreground/10 shadow-2xl bg-background/95 backdrop-blur-xl" align="end">
-              <div className="grid gap-1">
+            </DialogTrigger>
+            <DialogContent className="w-80 p-0 rounded-2xl border-foreground/10 shadow-2xl bg-background/95 backdrop-blur-xl overflow-hidden" showCloseButton={false}>
+              <div className="p-2 max-h-[80vh] overflow-y-auto grid gap-1">
                 <div className="px-3 py-2 text-[9px] font-black uppercase tracking-widest opacity-30">Global Interface</div>
                 
                 <Button 
@@ -239,14 +240,33 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
                   Force Refresh
                 </Button>
 
-                <Button 
+                <Button
                   onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-                  variant="ghost" 
+                  variant="ghost"
                   className="w-full justify-start h-10 rounded-xl gap-3 text-[10px] font-bold uppercase tracking-wider"
                 >
                   {theme === "dark" ? <Sun className="size-4 text-warning" /> : <Moon className="size-4 text-primary" />}
                   Theme: {theme === "dark" ? "Light" : "Dark"}
                 </Button>
+
+                <div className="px-1">
+                  <div className="px-2 pb-1 text-[9px] font-black uppercase tracking-widest opacity-30 flex items-center gap-1.5"><Type className="size-3" />Font Family</div>
+                  <div className="grid grid-cols-1 gap-0.5">
+                    {(Object.keys(FONT_LABELS) as AppFont[]).map((f) => (
+                      <Button
+                        key={f}
+                        variant={font === f ? "secondary" : "ghost"}
+                        className="w-full justify-start h-8 rounded-lg text-[10px] font-semibold tracking-wide px-3"
+                        onClick={() => setFont(f)}
+                      >
+                        <span style={{ fontFamily: f === "geist" ? "'Geist Variable', sans-serif" : f === "inter" ? "'Inter', sans-serif" : f === "jetbrains-mono" ? "'JetBrains Mono', monospace" : f === "ibm-plex" ? "'IBM Plex Sans', sans-serif" : "system-ui" }}>
+                          {FONT_LABELS[f]}
+                        </span>
+                        {font === f && <span className="ml-auto text-primary text-[8px]">✓</span>}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
 
                 {isExplorer && (
                   <>
@@ -262,13 +282,31 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
                       Add New Record
                     </Button>
 
-                    <Button 
+                    <Button
                       onClick={() => window.dispatchEvent(new CustomEvent('explorer:export:csv'))}
-                      variant="ghost" 
+                      variant="ghost"
                       className="w-full justify-start h-10 rounded-xl gap-3 text-[10px] font-bold uppercase tracking-wider"
                     >
                       <Download className="size-4 opacity-50" />
                       Export to CSV
+                    </Button>
+
+                    <Button
+                      onClick={() => window.dispatchEvent(new CustomEvent('explorer:export:json'))}
+                      variant="ghost"
+                      className="w-full justify-start h-10 rounded-xl gap-3 text-[10px] font-bold uppercase tracking-wider"
+                    >
+                      <Download className="size-4 opacity-50" />
+                      Export to JSON
+                    </Button>
+
+                    <Button
+                      onClick={() => window.dispatchEvent(new CustomEvent('explorer:filter:toggle'))}
+                      variant="ghost"
+                      className="w-full justify-start h-10 rounded-xl gap-3 text-[10px] font-bold uppercase tracking-wider"
+                    >
+                      <Filter className="size-4 opacity-50" />
+                      Toggle Column Filters
                     </Button>
 
                     <Button 
@@ -291,6 +329,20 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
                   </>
                 )}
 
+                {authRequired && (
+                  <>
+                    <div className="h-px bg-border/50 my-1 mx-2" />
+                    <Button
+                      onClick={logout}
+                      variant="ghost"
+                      className="w-full justify-start h-10 rounded-xl gap-3 text-[10px] font-bold uppercase tracking-wider text-destructive hover:text-destructive hover:bg-destructive/10"
+                    >
+                      <LogOut className="size-4" />
+                      Sign Out
+                    </Button>
+                  </>
+                )}
+
                 <div className="h-px bg-border/50 my-1 mx-2" />
                 <div className="px-3 py-2 text-[9px] font-black uppercase tracking-widest opacity-30">Quick Access</div>
 
@@ -307,12 +359,12 @@ export const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
                   >SQL Lab</Button>
                 </div>
               </div>
-            </PopoverContent>
-          </Popover>
+            </DialogContent>
+          </Dialog>
         </div>
       </header>
 
-      <main className="flex-1 w-full">
+      <main className="flex-1 w-full overflow-hidden min-h-0 flex flex-col">
         {children}
       </main>
     </div>

@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import { 
@@ -40,9 +40,12 @@ import { Label } from "@/components/ui/label";
 
 import { Textarea } from "@/components/ui/textarea";
 import { useSocket } from "@/context/SocketContext";
+import { useToast } from "@/context/ToastContext";
+import { apiFetch } from "@/lib/apiFetch";
 
 export default function Explorer() {
   const { socket } = useSocket();
+  const { toast } = useToast();
   const { tableName: urlTableName } = useParams();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -91,23 +94,34 @@ export default function Explorer() {
   // Sorting State
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: "asc" | "desc" } | null>(null);
 
+  // Column types & filters
+  const [columnTypes, setColumnTypes] = useState<Record<string, string>>({});
+  const [columnFilters, setColumnFilters] = useState<Record<string, string>>({});
+  const [showFilters, setShowFilters] = useState(false);
+
   // Global Action Listeners
   useEffect(() => {
     const handleAdd = () => { setFormData({}); setIsCreateOpen(true); };
     const handleExportCsv = () => exportData("csv");
+    const handleExportJson = () => exportData("json");
     const handleZenToggle = () => setIsZenMode(prev => !prev);
     const handleTruncateTrigger = () => setIsTruncateOpen(true);
+    const handleFilterToggle = () => setShowFilters(prev => !prev);
 
     window.addEventListener('explorer:add', handleAdd);
     window.addEventListener('explorer:export:csv', handleExportCsv);
+    window.addEventListener('explorer:export:json', handleExportJson);
     window.addEventListener('explorer:zen:toggle', handleZenToggle);
     window.addEventListener('explorer:truncate', handleTruncateTrigger);
+    window.addEventListener('explorer:filter:toggle', handleFilterToggle);
 
     return () => {
       window.removeEventListener('explorer:add', handleAdd);
       window.removeEventListener('explorer:export:csv', handleExportCsv);
+      window.removeEventListener('explorer:export:json', handleExportJson);
       window.removeEventListener('explorer:zen:toggle', handleZenToggle);
       window.removeEventListener('explorer:truncate', handleTruncateTrigger);
+      window.removeEventListener('explorer:filter:toggle', handleFilterToggle);
     };
   }, [tablesList, rows, columns]); // Re-bind if data changes for export
 
@@ -115,37 +129,40 @@ export default function Explorer() {
   const filteredRows = useMemo(() => {
     let result = [...rows];
 
-    // Search Filtering
+    // Global search filtering
     if (searchQuery) {
       const query = searchQuery.toLowerCase();
-      result = result.filter(row => 
-        Object.values(row).some(val => 
-          String(val).toLowerCase().includes(query)
-        )
+      result = result.filter(row =>
+        Object.values(row).some(val => String(val).toLowerCase().includes(query))
       );
     }
+
+    // Column-level filters
+    Object.entries(columnFilters).forEach(([col, filterVal]) => {
+      if (!filterVal.trim()) return;
+      const fv = filterVal.toLowerCase();
+      result = result.filter(row => String(row[col] ?? "").toLowerCase().includes(fv));
+    });
 
     // Sorting
     if (sortConfig) {
       result.sort((a, b) => {
         const aVal = a[sortConfig.key];
         const bVal = b[sortConfig.key];
-        
         if (aVal === bVal) return 0;
         if (aVal === null) return 1;
         if (bVal === null) return -1;
-        
         const comparison = aVal < bVal ? -1 : 1;
         return sortConfig.direction === "asc" ? comparison : -comparison;
       });
     }
 
     return result;
-  }, [rows, searchQuery, sortConfig]);
+  }, [rows, searchQuery, sortConfig, columnFilters]);
 
   useEffect(() => {
     // Fetch tables via HTTP for initial load performance
-    fetch("/api/tables")
+    apiFetch("/api/tables")
       .then(res => {
         if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
         return res.json();
@@ -161,10 +178,20 @@ export default function Explorer() {
 
   useEffect(() => {
     if (urlTableName) {
-      fetch(`/api/primary-key/${urlTableName}`)
+      apiFetch(`/api/primary-key/${urlTableName}`)
         .then(res => res.json())
         .then(data => setPrimaryKey(data.primaryKey))
         .catch(console.error);
+    }
+  }, [urlTableName]);
+
+  useEffect(() => {
+    if (urlTableName) {
+      apiFetch(`/api/column-types/${urlTableName}`)
+        .then(r => r.json())
+        .then(data => setColumnTypes(data))
+        .catch(console.error);
+      setColumnFilters({});
     }
   }, [urlTableName]);
 
@@ -196,18 +223,26 @@ export default function Explorer() {
       }
     };
 
-    const handleCrudSuccess = () => {
+    const handleCrudSuccess = (data: { action: string; tableName: string }) => {
       setIsOperationLoading(false);
       setIsCreateOpen(false);
       setIsEditOpen(false);
       setIsDeleteOpen(false);
-      // Small toast or notification could go here
+      setIsTruncateOpen(false);
+      const msgs: Record<string, string> = {
+        create: "Record created successfully",
+        update: "Record updated successfully",
+        delete: "Record deleted",
+        truncate: "Table truncated",
+      };
+      toast(msgs[data?.action] || "Operation completed", data?.action === "delete" || data?.action === "truncate" ? "warning" : "success");
     };
 
     const handleError = (msg: string) => {
       setError(msg);
       setIsLoading(false);
       setIsOperationLoading(false);
+      toast(msg, "error");
     };
 
     socket.on("table_update", handleUpdate);
@@ -391,12 +426,12 @@ export default function Explorer() {
   );
 
   return (
-    <div className="flex-1 flex flex-col bg-background">
+    <div className="flex-1 flex flex-col bg-background min-h-0 overflow-hidden">
       {/* Main Table View Area - Full Screen Fill */}
-      <div className="flex-1 flex flex-col min-h-0 bg-background relative">
+      <div className="flex-1 flex flex-col min-h-0 bg-background relative overflow-hidden">
         {error ? (
           <div className="flex-1 flex flex-col items-center justify-center p-10 opacity-50 space-y-4">
-            <ServerCrash className="size-16 text-destructive stroke-[1]" />
+            <ServerCrash className="size-16 text-destructive stroke-1" />
             <p className="text-sm font-black uppercase tracking-[0.2em]">{error}</p>
             <Button variant="outline" onClick={() => window.location.reload()} className="rounded-full px-8 h-12 uppercase text-[10px] font-black tracking-widest gap-3">
               <RefreshCw className="size-4" />
@@ -408,8 +443,8 @@ export default function Explorer() {
             <TableSkeleton />
           </div>
         ) : (
-          <div className="flex-1 flex flex-col">
-            <div className="flex-1">
+          <div className="flex-1 flex flex-col min-h-0">
+            <div className="flex-1 min-h-0 overflow-hidden">
               <ScrollArea className="w-full h-full">
                 <Table>
                   <TableHeader className="bg-background/80 backdrop-blur-xl border-b shadow-sm sticky top-0 z-50">
@@ -418,26 +453,31 @@ export default function Explorer() {
                         Snapshot
                       </TableHead>
                       {columns.map((col) => (
-                        <TableHead 
-                          key={col} 
-                          className="px-6 py-5 cursor-pointer group whitespace-nowrap"
+                        <TableHead
+                          key={col}
+                          className="px-6 py-3 cursor-pointer group whitespace-nowrap"
                           onClick={() => toggleSort(col)}
                         >
-                          <div className="flex items-center gap-2.5">
-                            <span className="text-[10px] font-black uppercase tracking-[0.2em] group-hover:text-foreground transition-colors">
-                              {col}
-                            </span>
-                            <ArrowUpDown className={cn(
-                              "size-3 transition-all opacity-0 group-hover:opacity-30",
-                              sortConfig?.key === col && "opacity-100 text-primary"
-                            )} />
-                            {sortConfig?.key === col && (
-                              <Badge variant="secondary" className="text-[7px] font-black px-1.5 py-0 rounded-md bg-primary/10 text-primary border-none uppercase tracking-tighter">
-                                {sortConfig.direction}
-                              </Badge>
-                            )}
-                            {primaryKey === col && !sortConfig?.key && (
-                              <Badge variant="outline" className="text-[7px] py-0 px-1.5 opacity-30 border-primary/20 text-primary">PK</Badge>
+                          <div className="flex flex-col gap-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] font-black uppercase tracking-[0.2em] group-hover:text-foreground transition-colors">
+                                {col}
+                              </span>
+                              <ArrowUpDown className={cn(
+                                "size-3 transition-all opacity-0 group-hover:opacity-30",
+                                sortConfig?.key === col && "opacity-100 text-primary"
+                              )} />
+                              {sortConfig?.key === col && (
+                                <Badge variant="secondary" className="text-[7px] font-black px-1.5 py-0 rounded-md bg-primary/10 text-primary border-none uppercase tracking-tighter">
+                                  {sortConfig.direction}
+                                </Badge>
+                              )}
+                              {primaryKey === col && (
+                                <Badge variant="outline" className="text-[7px] py-0 px-1.5 border-primary/20 text-primary opacity-60">PK</Badge>
+                              )}
+                            </div>
+                            {columnTypes[col] && (
+                              <span className="text-[8px] font-mono text-muted-foreground/30 uppercase">{columnTypes[col]}</span>
                             )}
                           </div>
                         </TableHead>
@@ -446,6 +486,25 @@ export default function Explorer() {
                         Actions
                       </TableHead>
                     </TableRow>
+                    {showFilters && (
+                      <TableRow className="border-none hover:bg-transparent bg-muted/10">
+                        <TableHead className="px-8 py-2" />
+                        {columns.map((col) => (
+                          <TableHead key={col} className="px-3 py-2">
+                            <Input
+                              placeholder={`Filter ${col}...`}
+                              value={columnFilters[col] || ""}
+                              onChange={e => setColumnFilters(prev => ({ ...prev, [col]: e.target.value }))}
+                              onClick={e => e.stopPropagation()}
+                              className="h-7 text-[10px] font-mono bg-muted/20 border-foreground/10 rounded-lg px-2 w-full min-w-20"
+                            />
+                          </TableHead>
+                        ))}
+                        <TableHead className="sticky right-0 z-40 bg-background border-l px-4 py-2">
+                          <Button variant="ghost" size="sm" className="h-7 text-[9px] font-black uppercase tracking-widest opacity-50 hover:opacity-100" onClick={() => setColumnFilters({})}>Clear</Button>
+                        </TableHead>
+                      </TableRow>
+                    )}
                   </TableHeader>
                   <TableBody>
                     {filteredRows.map((row, index) => (
@@ -522,7 +581,7 @@ export default function Explorer() {
       </div>
 
       {/* Footer Status Bar - Compact & Simple */}
-      <div className="h-10 border-t bg-muted/5 px-6 flex items-center justify-between flex-shrink-0 z-40 relative zen-hide">
+      <div className="h-10 border-t bg-muted/5 px-6 flex items-center justify-between shrink-0 z-40 relative zen-hide">
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">
@@ -549,9 +608,14 @@ export default function Explorer() {
           </Button>
 
           <div className="flex items-center gap-1 mx-2">
-            {Array.from({ length: Math.min(5, paginationInfo?.totalPages ?? 0) }).map((_, i) => {
-              const p = i + 1;
-              return (
+            {(() => {
+              const total = paginationInfo?.totalPages ?? 0;
+              if (total === 0) return null;
+              const half = 2;
+              let start = Math.max(1, page - half);
+              let end = Math.min(total, start + 4);
+              if (end - start < 4) start = Math.max(1, end - 4);
+              return Array.from({ length: end - start + 1 }, (_, i) => start + i).map(p => (
                 <Button
                   key={p}
                   variant={page === p ? "secondary" : "ghost"}
@@ -561,8 +625,8 @@ export default function Explorer() {
                 >
                   {p}
                 </Button>
-              );
-            })}
+              ));
+            })()}
           </div>
 
           <Button 
@@ -589,7 +653,7 @@ export default function Explorer() {
               setPage(1);
             }}
           >
-            <SelectTrigger className="h-6 w-[80px] bg-transparent border-none text-[10px] font-black uppercase hover:bg-foreground/5 transition-all">
+            <SelectTrigger className="h-6 w-20 bg-transparent border-none text-[10px] font-black uppercase hover:bg-foreground/5 transition-all">
               <SelectValue />
             </SelectTrigger>
             <SelectContent className="rounded-xl border-foreground/10 bg-background/95 backdrop-blur-xl">
@@ -606,7 +670,7 @@ export default function Explorer() {
         <motion.div 
           initial={{ y: 50, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
-          className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[200]"
+          className="fixed bottom-8 left-1/2 -translate-x-1/2 z-200"
         >
           <Button 
             onClick={() => setIsZenMode(false)}
@@ -685,7 +749,7 @@ export default function Explorer() {
                   <Label className="text-[10px] font-black uppercase tracking-[0.25em] text-muted-foreground/60 group-focus-within:text-foreground transition-colors">{col}</Label>
                   {typeof formData[col] === 'string' && formData[col].length > 100 ? (
                     <Textarea 
-                      className="min-h-[150px] bg-muted/20 border-transparent focus:border-foreground/10 focus:bg-background rounded-2xl px-6 py-4 font-mono text-sm transition-all shadow-sm"
+                      className="min-h-37.5 bg-muted/20 border-transparent focus:border-foreground/10 focus:bg-background rounded-2xl px-6 py-4 font-mono text-sm transition-all shadow-sm"
                       value={formData[col] || ""}
                       onChange={(e) => setFormData({ ...formData, [col]: e.target.value })}
                     />

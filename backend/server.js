@@ -7,12 +7,24 @@ const path = require('path');
 const http = require('http');
 const { Server } = require('socket.io');
 const fs = require('fs');
+const crypto = require('crypto');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
 const PORT = process.env.PORT || 4006;
+
+// --- Auth ---
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+const activeSessions = new Set();
+
+function requireAuth(req, res, next) {
+    if (!ADMIN_PASSWORD) return next(); // auth disabled if no password set
+    const token = req.headers['x-auth-token'] || req.query.token;
+    if (token && activeSessions.has(token)) return next();
+    return res.status(401).json({ error: 'Unauthorized' });
+}
 
 app.use(cors());
 app.use(express.json());
@@ -160,6 +172,123 @@ class DBAdapter {
         }
     }
 
+    async getSchemaInfo(tableName) {
+        if (this.type === 'postgres') {
+            const colQuery = `
+                SELECT
+                    c.column_name, c.data_type, c.character_maximum_length,
+                    c.numeric_precision, c.numeric_scale,
+                    c.is_nullable, c.column_default,
+                    CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END as is_primary_key
+                FROM information_schema.columns c
+                LEFT JOIN (
+                    SELECT ku.column_name
+                    FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage ku ON tc.constraint_name = ku.constraint_name AND tc.table_schema = ku.table_schema
+                    WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = 'public'
+                ) pk ON c.column_name = pk.column_name
+                WHERE c.table_name = $1 AND c.table_schema = 'public'
+                ORDER BY c.ordinal_position
+            `;
+            const fkQuery = `
+                SELECT
+                    kcu.column_name,
+                    ccu.table_name AS foreign_table,
+                    ccu.column_name AS foreign_column
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+                JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema
+                WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name = $1 AND tc.table_schema = 'public'
+            `;
+            const idxQuery = `
+                SELECT i.relname as index_name,
+                       array_agg(a.attname ORDER BY x.ord) as columns,
+                       ix.indisunique as is_unique,
+                       ix.indisprimary as is_primary
+                FROM pg_class t
+                JOIN pg_index ix ON t.oid = ix.indrelid
+                JOIN pg_class i ON i.oid = ix.indexrelid
+                JOIN (SELECT unnest(indkey) as col, generate_subscripts(indkey, 1) as ord, indexrelid FROM pg_index) x ON x.indexrelid = ix.indexrelid
+                JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = x.col
+                WHERE t.relkind = 'r' AND t.relname = $1
+                GROUP BY i.relname, ix.indisunique, ix.indisprimary
+            `;
+            const [cols, fks, idxs] = await Promise.all([
+                this.pool.query(colQuery, [tableName.toLowerCase()]),
+                this.pool.query(fkQuery, [tableName.toLowerCase()]),
+                this.pool.query(idxQuery, [tableName.toLowerCase()])
+            ]);
+            const fkMap = {};
+            fks.rows.forEach(fk => { fkMap[fk.column_name] = { table: fk.foreign_table, column: fk.foreign_column }; });
+            return {
+                columns: cols.rows.map(c => ({
+                    name: c.column_name,
+                    type: c.character_maximum_length ? `${c.data_type}(${c.character_maximum_length})` : c.numeric_precision ? `${c.data_type}(${c.numeric_precision}${c.numeric_scale ? ',' + c.numeric_scale : ''})` : c.data_type,
+                    nullable: c.is_nullable === 'YES',
+                    default: c.column_default,
+                    isPrimaryKey: c.is_primary_key,
+                    foreignKey: fkMap[c.column_name] || null
+                })),
+                indexes: idxs.rows.map(i => ({ name: i.index_name, columns: i.columns, isUnique: i.is_unique, isPrimary: i.is_primary }))
+            };
+        } else {
+            const colQuery = `
+                SELECT
+                    c.COLUMN_NAME as column_name, c.DATA_TYPE as data_type,
+                    c.CHARACTER_MAXIMUM_LENGTH as character_maximum_length,
+                    c.NUMERIC_PRECISION as numeric_precision, c.NUMERIC_SCALE as numeric_scale,
+                    c.IS_NULLABLE as is_nullable, c.COLUMN_DEFAULT as column_default,
+                    CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END as is_primary_key
+                FROM INFORMATION_SCHEMA.COLUMNS c
+                LEFT JOIN (
+                    SELECT ku.COLUMN_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+                    JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku ON tc.CONSTRAINT_NAME = ku.CONSTRAINT_NAME
+                    WHERE tc.TABLE_NAME = @tableName AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+                ) pk ON c.COLUMN_NAME = pk.COLUMN_NAME
+                WHERE c.TABLE_NAME = @tableName
+                ORDER BY c.ORDINAL_POSITION
+            `;
+            const fkQuery = `
+                SELECT kcu.COLUMN_NAME as column_name, ccu.TABLE_NAME as foreign_table, ccu.COLUMN_NAME as foreign_column
+                FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+                JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+                JOIN INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE ccu ON ccu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+                WHERE tc.CONSTRAINT_TYPE = 'FOREIGN KEY' AND tc.TABLE_NAME = @tableName
+            `;
+            const idxQuery = `
+                SELECT i.name as index_name, c.name as column_name, i.is_unique, i.is_primary_key
+                FROM sys.indexes i
+                JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+                JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+                JOIN sys.tables t ON i.object_id = t.object_id
+                WHERE t.name = @tableName
+                ORDER BY i.name, ic.key_ordinal
+            `;
+            const req1 = this.pool.request().input('tableName', sql.NVarChar, tableName);
+            const req2 = this.pool.request().input('tableName', sql.NVarChar, tableName);
+            const req3 = this.pool.request().input('tableName', sql.NVarChar, tableName);
+            const [cols, fks, idxRaw] = await Promise.all([req1.query(colQuery), req2.query(fkQuery), req3.query(idxQuery)]);
+            const fkMap = {};
+            fks.recordset.forEach(fk => { fkMap[fk.column_name] = { table: fk.foreign_table, column: fk.foreign_column }; });
+            const idxMap = {};
+            idxRaw.recordset.forEach(r => {
+                if (!idxMap[r.index_name]) idxMap[r.index_name] = { name: r.index_name, columns: [], isUnique: !!r.is_unique, isPrimary: !!r.is_primary_key };
+                idxMap[r.index_name].columns.push(r.column_name);
+            });
+            return {
+                columns: cols.recordset.map(c => ({
+                    name: c.column_name,
+                    type: c.character_maximum_length ? `${c.data_type}(${c.character_maximum_length})` : c.numeric_precision ? `${c.data_type}(${c.numeric_precision}${c.numeric_scale ? ',' + c.numeric_scale : ''})` : c.data_type,
+                    nullable: c.is_nullable === 'YES',
+                    default: c.column_default,
+                    isPrimaryKey: !!c.is_primary_key,
+                    foreignKey: fkMap[c.column_name] || null
+                })),
+                indexes: Object.values(idxMap)
+            };
+        }
+    }
+
     async createRow(tableName, data) {
         let cols = [];
         if (this.type === 'postgres') {
@@ -244,8 +373,30 @@ async function connectToDatabase(config) {
 // Initial connection attempt
 connectToDatabase(dbConfig).catch(() => {});
 
+// Auth endpoints (public)
+app.post('/api/auth/login', (req, res) => {
+    const { password } = req.body;
+    if (!ADMIN_PASSWORD) return res.json({ token: null, authRequired: false });
+    if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Invalid password' });
+    const token = crypto.randomBytes(32).toString('hex');
+    activeSessions.add(token);
+    res.json({ token });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+    const token = req.headers['x-auth-token'];
+    if (token) activeSessions.delete(token);
+    res.json({ success: true });
+});
+
+app.get('/api/auth/status', (req, res) => {
+    if (!ADMIN_PASSWORD) return res.json({ authRequired: false });
+    const token = req.headers['x-auth-token'] || req.query.token;
+    res.json({ authRequired: true, authenticated: !!(token && activeSessions.has(token)) });
+});
+
 // Admin Endpoints for Database Config
-app.post('/api/config', async (req, res) => {
+app.post('/api/config', requireAuth, async (req, res) => {
     try {
         const { type, port, server, database, user, password } = req.body;
         
@@ -283,7 +434,7 @@ app.post('/api/config', async (req, res) => {
     }
 });
 
-app.get('/api/config', (req, res) => {
+app.get('/api/config', requireAuth, (req, res) => {
     res.json({
         type: dbConfig.type || 'mssql',
         port: dbConfig.port || '',
@@ -294,7 +445,7 @@ app.get('/api/config', (req, res) => {
     });
 });
 
-app.post('/api/disconnect', async (req, res) => {
+app.post('/api/disconnect', requireAuth, async (req, res) => {
     try {
         if (activeDbAdapter) {
             try {
@@ -344,7 +495,7 @@ io.on('connection', (socket) => {
 
     socket.on('run_query', async (rawQuery) => {
         try {
-            console.log(`🔍 Executing Raw Query from ${socket.id}: ${rawQuery.substring(0, 100)}...`);
+            console.log(`🔍 Executing Raw Query from ${socket.id}: ${rawQuery.length > 100 ? rawQuery.substring(0, 100) + '...' : rawQuery}`);
             const db = await getDb();
             const { rows, columns } = await db.rawQuery(rawQuery);
             
@@ -448,7 +599,6 @@ async function fetchAndBroadcastTable(tableName, page, pageSize, roomName) {
         const totalRows = await db.getTotalRows(tableName);
 
         // 3. Get paginated rows
-        const lowerCols = columns.map(c => c.toLowerCase());
         const timestampCol = columns.find(c => {
             const lc = c.toLowerCase();
             return lc.includes('created') || lc.includes('updated') || lc.includes('timestamp') || lc.includes('time') || lc.includes('date') || lc === 'dt';
@@ -519,11 +669,9 @@ setInterval(() => {
     });
 }, 5000);
 
-// Serve static files from the frontend build
 const staticPath = path.join(__dirname, '../frontend/dist');
-app.use(express.static(staticPath));
 
-app.get('/api/tables', async (req, res) => {
+app.get('/api/tables', requireAuth, async (req, res) => {
     try {
         const db = await getDb();
         const tables = await db.getTables();
@@ -533,7 +681,7 @@ app.get('/api/tables', async (req, res) => {
     }
 });
 
-app.get('/api/primary-key/:tableName', async (req, res) => {
+app.get('/api/primary-key/:tableName', requireAuth, async (req, res) => {
     try {
         const db = await getDb();
         let pk = await db.getPrimaryKey(req.params.tableName);
@@ -550,6 +698,76 @@ app.get('/api/primary-key/:tableName', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
+app.get('/api/column-types/:tableName', requireAuth, async (req, res) => {
+    try {
+        const db = await getDb();
+        const tableName = req.params.tableName;
+        if (db.type === 'postgres') {
+            const res2 = await db.pool.query(
+                `SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1 AND table_schema = 'public' ORDER BY ordinal_position`,
+                [tableName.toLowerCase()]
+            );
+            const map = {};
+            res2.rows.forEach(r => { map[r.column_name] = r.data_type; });
+            res.json(map);
+        } else {
+            const r = await db.pool.request().input('t', sql.NVarChar, tableName)
+                .query(`SELECT COLUMN_NAME as column_name, DATA_TYPE as data_type FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @t ORDER BY ORDINAL_POSITION`);
+            const map = {};
+            r.recordset.forEach(row => { map[row.column_name] = row.data_type; });
+            res.json(map);
+        }
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/schema/:tableName', requireAuth, async (req, res) => {
+    try {
+        const db = await getDb();
+        const schema = await db.getSchemaInfo(req.params.tableName);
+        res.json(schema);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Saved connection profiles
+const CONNECTIONS_FILE = path.join(__dirname, 'connections.json');
+
+function loadConnections() {
+    if (!fs.existsSync(CONNECTIONS_FILE)) return [];
+    try { return JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8')); } catch { return []; }
+}
+
+function saveConnections(conns) {
+    fs.writeFileSync(CONNECTIONS_FILE, JSON.stringify(conns, null, 2));
+}
+
+app.get('/api/connections', requireAuth, (req, res) => {
+    res.json(loadConnections());
+});
+
+app.post('/api/connections', requireAuth, (req, res) => {
+    const { name, type, server, port, database, user, password } = req.body;
+    if (!name || !server || !user) return res.status(400).json({ error: 'name, server, user are required' });
+    const conns = loadConnections();
+    const existing = conns.findIndex(c => c.name === name);
+    const entry = { name, type: type || 'mssql', server, port, database, user, password };
+    if (existing >= 0) conns[existing] = entry; else conns.push(entry);
+    saveConnections(conns);
+    res.json({ success: true });
+});
+
+app.delete('/api/connections/:name', requireAuth, (req, res) => {
+    const conns = loadConnections().filter(c => c.name !== req.params.name);
+    saveConnections(conns);
+    res.json({ success: true });
+});
+
+// Serve static files from the frontend build (after API routes to prevent shadowing)
+app.use(express.static(staticPath));
 
 app.all('*', (req, res) => {
     if (req.path.startsWith('/api')) return res.status(404).json({ error: 'Endpoint not found' });
