@@ -5,8 +5,8 @@ export type AppFont = "geist" | "inter" | "jetbrains-mono" | "ibm-plex" | "syste
 
 const FONT_MAP: Record<AppFont, string> = {
   geist: "'Geist Variable', sans-serif",
-  inter: "'Inter', sans-serif",
-  "jetbrains-mono": "'JetBrains Mono', monospace",
+  inter: "'Inter Variable', sans-serif",
+  "jetbrains-mono": "'JetBrains Mono Variable', monospace",
   "ibm-plex": "'IBM Plex Sans', sans-serif",
   system: "system-ui, -apple-system, sans-serif",
 };

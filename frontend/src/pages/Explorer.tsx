@@ -1,12 +1,12 @@
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { motion } from "framer-motion";
-import { 
-  Loader2, ServerCrash, 
-  Copy, Maximize2, Minimize, Check,
-  ChevronLeft, ChevronRight,
+import {
+  Loader2, ServerCrash,
+  Copy, Minimize, Check,
+  ChevronLeft, ChevronRight, ChevronUp, ChevronDown,
   ArrowUpDown, Trash2, Edit, Save, AlertTriangle,
-  RefreshCw, X,
+  RefreshCw, X, Eye, Inbox, GripVertical,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -32,8 +32,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
-import { Badge } from "@/components/ui/badge";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -63,27 +63,24 @@ export default function Explorer() {
 
   // CRUD State
   const [isCreateOpen, setIsCreateOpen] = useState(false);
-  const [isEditOpen, setIsEditOpen] = useState(false);
-  const [isDeleteOpen, setIsDeleteOpen] = useState(false);
   const [isTruncateOpen, setIsTruncateOpen] = useState(false);
   const [activeRow, setActiveRow] = useState<any>(null);
   const [formData, setFormData] = useState<any>({});
   const [isOperationLoading, setIsOperationLoading] = useState(false);
 
-  // Preview State
-  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
-  const [previewData, setPreviewData] = useState<{
-    val: any;
-    colName: string;
-    rowIndex: number;
-    cellId: string;
-  } | null>(null);
+  // Row Modal State (Preview / Edit / Delete tabs)
+  const [isRowModalOpen, setIsRowModalOpen] = useState(false);
+  const [rowModalTab, setRowModalTab] = useState<"preview" | "edit" | "delete">("preview");
 
   const [isZenMode, setIsZenMode] = useState(false);
 
   // Pagination State
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
+  const pageRef = useRef(page);
+  const pageSizeRef = useRef(pageSize);
+  useEffect(() => { pageRef.current = page; }, [page]);
+  useEffect(() => { pageSizeRef.current = pageSize; }, [pageSize]);
   const [paginationInfo, setPaginationInfo] = useState<{
     totalRows: number;
     currentPage: number;
@@ -93,6 +90,11 @@ export default function Explorer() {
 
   // Sorting State
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: "asc" | "desc" } | null>(null);
+
+  // Column order (drag-and-drop reordering)
+  const [columnOrder, setColumnOrder] = useState<string[]>([]);
+  const dragSourceIdx = useRef<number | null>(null);
+  const [dragOverColIdx, setDragOverColIdx] = useState<number | null>(null);
 
   // Column types & filters
   const [columnTypes, setColumnTypes] = useState<Record<string, string>>({});
@@ -226,8 +228,7 @@ export default function Explorer() {
     const handleCrudSuccess = (data: { action: string; tableName: string }) => {
       setIsOperationLoading(false);
       setIsCreateOpen(false);
-      setIsEditOpen(false);
-      setIsDeleteOpen(false);
+      setIsRowModalOpen(false);
       setIsTruncateOpen(false);
       const msgs: Record<string, string> = {
         create: "Record created successfully",
@@ -236,6 +237,10 @@ export default function Explorer() {
         truncate: "Table truncated",
       };
       toast(msgs[data?.action] || "Operation completed", data?.action === "delete" || data?.action === "truncate" ? "warning" : "success");
+      // Force-refresh: re-subscribe so table always shows latest data immediately
+      if (urlTableName) {
+        socket.emit("subscribe", { tableName: urlTableName, page: pageRef.current, pageSize: pageSizeRef.current });
+      }
     };
 
     const handleError = (msg: string) => {
@@ -268,6 +273,10 @@ export default function Explorer() {
   }, [urlTableName]);
 
   useEffect(() => {
+    setColumnOrder(columns);
+  }, [columns]);
+
+  useEffect(() => {
     if (isZenMode) {
       document.body.classList.add("zen-mode");
     } else {
@@ -277,6 +286,31 @@ export default function Explorer() {
   }, [isZenMode]);
 
 
+
+  const handleColDragStart = (idx: number) => {
+    dragSourceIdx.current = idx;
+  };
+
+  const handleColDragOver = (e: React.DragEvent, idx: number) => {
+    e.preventDefault();
+    if (dragSourceIdx.current !== idx) setDragOverColIdx(idx);
+  };
+
+  const handleColDrop = (idx: number) => {
+    if (dragSourceIdx.current !== null && dragSourceIdx.current !== idx) {
+      const newOrder = [...columnOrder];
+      const [moved] = newOrder.splice(dragSourceIdx.current, 1);
+      newOrder.splice(idx, 0, moved);
+      setColumnOrder(newOrder);
+    }
+    dragSourceIdx.current = null;
+    setDragOverColIdx(null);
+  };
+
+  const handleColDragEnd = () => {
+    dragSourceIdx.current = null;
+    setDragOverColIdx(null);
+  };
 
   const copyToClipboard = (text: string, id: string) => {
     navigator.clipboard.writeText(text);
@@ -296,9 +330,10 @@ export default function Explorer() {
       mimeType = "application/json";
       filename += ".json";
     } else {
-      const header = columns.join(",");
-      const csvRows = rows.map(row => 
-        columns.map(c => {
+      const orderedCols = columnOrder.length ? columnOrder : columns;
+      const header = orderedCols.join(",");
+      const csvRows = rows.map(row =>
+        orderedCols.map(c => {
           let val = row[c];
           if (val === null) return "NULL";
           if (typeof val === "object") return `"${JSON.stringify(val).replace(/"/g, '""')}"`;
@@ -373,38 +408,93 @@ export default function Explorer() {
     socket.emit("truncate_table", { tableName: urlTableName });
   };
 
-  const handleUpdate = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!socket || !activeRow || !primaryKey) return;
+  const performUpdate = () => {
+    if (!socket || !activeRow || !primaryKey) {
+      toast("Cannot save: missing connection or row data", "error");
+      return;
+    }
+
+    const updates: Record<string, any> = {};
+    Object.entries(formData).forEach(([key, value]) => {
+      if (key === primaryKey) return;
+      const colType = (columnTypes[key] || "").toLowerCase();
+      let castVal: any = value;
+      if (value === "" || value === null || value === undefined) {
+        castVal = null;
+      } else if (colType === "boolean") {
+        castVal = value === true || value === "true";
+      } else if (/^(integer|bigint|smallint|int4|int8|int2)/.test(colType)) {
+        const n = parseInt(String(value), 10);
+        castVal = isNaN(n) ? null : n;
+      } else if (/^(numeric|decimal|real|double precision|float4|float8)/.test(colType)) {
+        const n = parseFloat(String(value));
+        castVal = isNaN(n) ? null : n;
+      } else if (colType === "json" || colType === "jsonb") {
+        try { castVal = JSON.parse(String(value)); } catch { castVal = value; }
+      } else {
+        castVal = value;
+      }
+      updates[key] = castVal;
+    });
+
+    if (Object.keys(updates).length === 0) {
+      toast("No fields to update", "warning");
+      return;
+    }
+
     setIsOperationLoading(true);
     socket.emit("update_row", {
       tableName: urlTableName,
       primaryKey,
       pkValue: activeRow[primaryKey],
-      updates: formData
+      updates,
     });
+  };
+
+  const handleUpdate = (e: React.FormEvent) => {
+    e.preventDefault();
+    performUpdate();
+  };
+
+  const performCreate = () => {
+    if (!socket || !urlTableName) return;
+    setIsOperationLoading(true);
+    socket.emit("create_row", { tableName: urlTableName, data: formData });
   };
 
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!socket || !urlTableName) return;
-    setIsOperationLoading(true);
-    socket.emit("create_row", {
-      tableName: urlTableName,
-      data: formData
-    });
+    performCreate();
   };
 
   const CellPreview = ({ val }: { val: any }) => {
-    return (
-      <div className="group/cell relative max-w-full overflow-hidden">
-        <span className={cn(
-          "font-mono text-[11px] tracking-tight selection:bg-primary/30 line-clamp-2 break-all",
-          val === null ? "text-muted-foreground/30 italic" : "text-foreground/80"
-        )}>
-          {formatCellValue(val)}
+    const isNull = val === null || val === undefined;
+    const isJson = !isNull && (
+      typeof val === "object" ||
+      (typeof val === "string" && (val.startsWith("{") || val.startsWith("[")))
+    );
+
+    if (isNull) {
+      return <span className="font-mono text-[11px] text-muted-foreground/25 select-none">—</span>;
+    }
+    if (isJson) {
+      const chip = typeof val === "object"
+        ? (Array.isArray(val) ? "[…]" : "{…}")
+        : (val.startsWith("[") ? "[…]" : "{…}");
+      return (
+        <span className="font-mono text-[10px] text-muted-foreground/50 bg-muted/40 px-1.5 py-0.5 rounded border border-foreground/5">
+          {chip}
         </span>
-      </div>
+      );
+    }
+    const strVal = String(val);
+    return (
+      <span
+        title={strVal.length > 60 ? strVal : undefined}
+        className="font-mono text-[11px] tracking-tight text-foreground/80 truncate block max-w-60 selection:bg-primary/30"
+      >
+        {strVal}
+      </span>
     );
   };
 
@@ -435,7 +525,7 @@ export default function Explorer() {
             <p className="text-sm font-black uppercase tracking-[0.2em]">{error}</p>
             <Button variant="outline" onClick={() => window.location.reload()} className="rounded-full px-8 h-12 uppercase text-[10px] font-black tracking-widest gap-3">
               <RefreshCw className="size-4" />
-              Reconnect Cluster
+              Reload
             </Button>
           </div>
         ) : isLoading ? (
@@ -444,36 +534,42 @@ export default function Explorer() {
           </div>
         ) : (
           <div className="flex-1 flex flex-col min-h-0">
-            <div className="flex-1 min-h-0 overflow-hidden">
-              <ScrollArea className="w-full h-full">
-                <Table>
+            <div className="flex-1 overflow-auto h-0">
+              <Table>
                   <TableHeader className="bg-background/80 backdrop-blur-xl border-b shadow-sm sticky top-0 z-50">
                     <TableRow className="border-none hover:bg-transparent">
-                      <TableHead className="px-8 py-5 text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground/40">
-                        Snapshot
+                      <TableHead className="px-6 py-5 w-14 text-[10px] font-black text-muted-foreground/30">
+                        #
                       </TableHead>
-                      {columns.map((col) => (
+                      {columnOrder.map((col, idx) => (
                         <TableHead
                           key={col}
-                          className="px-6 py-3 cursor-pointer group whitespace-nowrap"
+                          draggable
+                          onDragStart={() => handleColDragStart(idx)}
+                          onDragOver={(e) => handleColDragOver(e, idx)}
+                          onDrop={() => handleColDrop(idx)}
+                          onDragEnd={handleColDragEnd}
                           onClick={() => toggleSort(col)}
+                          className={cn(
+                            "px-6 py-3 cursor-pointer group whitespace-nowrap select-none transition-colors",
+                            dragOverColIdx === idx && "border-l-2 border-primary bg-primary/5"
+                          )}
                         >
                           <div className="flex flex-col gap-1">
                             <div className="flex items-center gap-2">
+                              <GripVertical className="size-3 shrink-0 opacity-0 group-hover:opacity-20 cursor-grab active:cursor-grabbing -ml-1" />
                               <span className="text-[10px] font-black uppercase tracking-[0.2em] group-hover:text-foreground transition-colors">
                                 {col}
                               </span>
-                              <ArrowUpDown className={cn(
-                                "size-3 transition-all opacity-0 group-hover:opacity-30",
-                                sortConfig?.key === col && "opacity-100 text-primary"
-                              )} />
-                              {sortConfig?.key === col && (
-                                <Badge variant="secondary" className="text-[7px] font-black px-1.5 py-0 rounded-md bg-primary/10 text-primary border-none uppercase tracking-tighter">
-                                  {sortConfig.direction}
-                                </Badge>
+                              {sortConfig?.key === col ? (
+                                sortConfig.direction === "asc"
+                                  ? <ChevronUp className="size-3 text-primary shrink-0" />
+                                  : <ChevronDown className="size-3 text-primary shrink-0" />
+                              ) : (
+                                <ArrowUpDown className="size-3 opacity-0 group-hover:opacity-30 transition-opacity shrink-0" />
                               )}
                               {primaryKey === col && (
-                                <Badge variant="outline" className="text-[7px] py-0 px-1.5 border-primary/20 text-primary opacity-60">PK</Badge>
+                                <span className="text-[8px] font-mono text-primary/50 bg-primary/5 px-1.5 py-0.5 rounded border border-primary/10 uppercase leading-none">PK</span>
                               )}
                             </div>
                             {columnTypes[col] && (
@@ -482,14 +578,13 @@ export default function Explorer() {
                           </div>
                         </TableHead>
                       ))}
-                      <TableHead className="sticky right-0 z-40 bg-background border-l px-8 py-5 text-[10px] font-black uppercase tracking-[0.2em] text-center">
-                        Actions
-                      </TableHead>
                     </TableRow>
                     {showFilters && (
                       <TableRow className="border-none hover:bg-transparent bg-muted/10">
-                        <TableHead className="px-8 py-2" />
-                        {columns.map((col) => (
+                        <TableHead className="px-6 py-2 w-14">
+                          <Button variant="ghost" size="sm" className="h-7 text-[9px] font-black uppercase tracking-widest opacity-50 hover:opacity-100" onClick={() => setColumnFilters({})}>Clear</Button>
+                        </TableHead>
+                        {columnOrder.map((col) => (
                           <TableHead key={col} className="px-3 py-2">
                             <Input
                               placeholder={`Filter ${col}...`}
@@ -500,81 +595,47 @@ export default function Explorer() {
                             />
                           </TableHead>
                         ))}
-                        <TableHead className="sticky right-0 z-40 bg-background border-l px-4 py-2">
-                          <Button variant="ghost" size="sm" className="h-7 text-[9px] font-black uppercase tracking-widest opacity-50 hover:opacity-100" onClick={() => setColumnFilters({})}>Clear</Button>
-                        </TableHead>
                       </TableRow>
                     )}
                   </TableHeader>
                   <TableBody>
-                    {filteredRows.map((row, index) => (
-                      <TableRow 
-                        key={index} 
-                        className="group border-b border-muted-foreground/5 hover:bg-muted/15 transition-colors duration-200"
-                      >
-                        <TableCell className="px-8 py-4">
-                          <Badge variant="outline" className="font-mono text-[9px] opacity-20 group-hover:opacity-100 transition-opacity rounded-md border-foreground/10 px-2 py-0.5">
-                            {String((paginationInfo?.totalRows ?? rows.length) - ((page - 1) * pageSize) - index).padStart(3, '0')}
-                          </Badge>
+                    {filteredRows.length === 0 ? (
+                      <TableRow className="hover:bg-transparent border-none">
+                        <TableCell colSpan={columns.length + 1} className="h-64 text-center border-none">
+                          <div className="flex flex-col items-center gap-3 text-muted-foreground/30">
+                            <Inbox className="size-10 stroke-1" />
+                            <p className="text-sm font-black uppercase tracking-widest">No rows</p>
+                            {(searchQuery || Object.values(columnFilters).some(v => v)) && (
+                              <p className="text-xs font-normal normal-case tracking-normal opacity-70">Try clearing your filters</p>
+                            )}
+                          </div>
                         </TableCell>
-                        {columns.map((col) => (
-                          <TableCell 
-                            key={col} 
-                            className="px-6 py-4 cursor-pointer"
-                            onClick={() => {
-                              setPreviewData({ val: row[col], colName: col, rowIndex: index, cellId: `${index}-${col}` });
-                              setIsPreviewOpen(true);
-                            }}
-                          >
+                      </TableRow>
+                    ) : filteredRows.map((row, index) => (
+                      <TableRow
+                        key={index}
+                        className="group border-b border-border hover:bg-muted/10 transition-colors duration-150 cursor-pointer"
+                        onClick={() => {
+                          setActiveRow(row);
+                          setFormData(row);
+                          setRowModalTab("preview");
+                          setIsRowModalOpen(true);
+                        }}
+                      >
+                        <TableCell className="px-6 py-4 w-14">
+                          <span className="font-mono text-[10px] text-muted-foreground/30 group-hover:text-muted-foreground/60 transition-colors tabular-nums">
+                            {((page - 1) * pageSize + index + 1).toLocaleString()}
+                          </span>
+                        </TableCell>
+                        {columnOrder.map((col) => (
+                          <TableCell key={col} className="px-6 py-4">
                             <CellPreview val={row[col]} />
                           </TableCell>
                         ))}
-                        <TableCell className="sticky right-0 z-30 bg-background border-l px-4 py-4">
-                          <div className="flex items-center justify-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <Button 
-                              variant="ghost" 
-                              size="icon" 
-                              className="size-8 rounded-xl hover:bg-primary/10 hover:text-primary transition-all border border-transparent hover:border-primary/20"
-                              onClick={() => {
-                                setFormData(row);
-                                setActiveRow(row);
-                                setIsEditOpen(true);
-                              }}
-                            >
-                              <Edit className="size-4" />
-                            </Button>
-                            
-                            <Button 
-                              variant="ghost" 
-                              size="icon" 
-                              className="size-8 rounded-xl hover:bg-destructive/10 hover:text-destructive transition-all border border-transparent hover:border-destructive/20"
-                              onClick={() => {
-                                setActiveRow(row);
-                                setIsDeleteOpen(true);
-                              }}
-                            >
-                              <Trash2 className="size-4" />
-                            </Button>
-
-                            <Button 
-                              variant="ghost" 
-                              size="icon" 
-                              className="size-8 rounded-xl hover:bg-foreground/5 transition-all border border-transparent hover:border-foreground/10"
-                              onClick={() => {
-                                setPreviewData({ val: row, colName: 'Preview', rowIndex: index, cellId: `row-${index}` });
-                                setIsPreviewOpen(true);
-                              }}
-                            >
-                              <Maximize2 className="size-4" />
-                            </Button>
-                          </div>
-                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
                 </Table>
-                <ScrollBar orientation="horizontal" />
-              </ScrollArea>
             </div>
           </div>
         )}
@@ -582,18 +643,12 @@ export default function Explorer() {
 
       {/* Footer Status Bar - Compact & Simple */}
       <div className="h-10 border-t bg-muted/5 px-6 flex items-center justify-between shrink-0 z-40 relative zen-hide">
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2">
-              <span className="text-[8px] font-bold uppercase tracking-widest text-muted-foreground/30">Total</span>
-              <span className="text-[10px] font-mono font-bold text-foreground/40">{paginationInfo?.totalRows ?? 0}</span>
-            </div>
-            
-            <div className="flex items-center gap-2">
-              <span className="text-[8px] font-bold uppercase tracking-widest text-muted-foreground/30">Page</span>
-              <span className="text-[10px] font-mono font-bold text-foreground/40">{paginationInfo?.currentPage ?? 1} / {paginationInfo?.totalPages ?? 1}</span>
-            </div>
-          </div>
+        <div className="flex items-center gap-4">
+          <span className="text-[11px] font-mono text-muted-foreground/50">
+            {paginationInfo ? (
+              <>Showing {((paginationInfo.currentPage - 1) * paginationInfo.pageSize + 1).toLocaleString()}–{Math.min(paginationInfo.currentPage * paginationInfo.pageSize, paginationInfo.totalRows).toLocaleString()} of {paginationInfo.totalRows.toLocaleString()} rows</>
+            ) : "No data"}
+          </span>
         </div>
 
         <div className="flex items-center gap-2">
@@ -682,134 +737,275 @@ export default function Explorer() {
         </motion.div>
       )}
 
-      {/* CRUD Modals - Full Screen Immersive Experience */}
+      {/* CRUD Modals */}
       <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
-        <DialogContent className="max-w-none w-screen h-screen top-0 flex flex-col p-0 bg-background border-none rounded-none overflow-hidden shadow-2xl" showCloseButton={false}>
-          <div className="px-10 py-8 border-b bg-muted/5 flex items-center justify-between">
-            <div className="flex flex-col gap-1">
-              <DialogHeader className="p-0">
-                <DialogTitle className="text-2xl font-black uppercase tracking-tighter">Forge Entry</DialogTitle>
-                <DialogDescription className="text-[10px] font-bold uppercase tracking-[0.3em] opacity-40">Constructing new record for {urlTableName}</DialogDescription>
-              </DialogHeader>
-            </div>
-            <Button variant="ghost" size="icon" onClick={() => setIsCreateOpen(false)} className="rounded-full size-12 hover:bg-foreground/5">
-              <X className="size-6" />
+        <DialogContent className="max-w-4xl w-full max-h-[90vh] flex flex-col p-0 bg-background border-foreground/10 rounded-2xl overflow-hidden shadow-2xl" showCloseButton={false}>
+          <div className="px-8 py-5 border-b bg-muted/5 flex items-center justify-between shrink-0">
+            <DialogHeader className="p-0">
+              <DialogTitle className="text-xl font-black uppercase tracking-tighter">New Row</DialogTitle>
+              <DialogDescription className="text-[10px] font-bold uppercase tracking-[0.3em] opacity-40">Insert a new record into {urlTableName}</DialogDescription>
+            </DialogHeader>
+            <Button variant="ghost" size="icon" onClick={() => setIsCreateOpen(false)} className="rounded-xl size-9 hover:bg-foreground/5">
+              <X className="size-5" />
             </Button>
           </div>
-          
-          <ScrollArea className="flex-1 min-h-0 px-10">
-            <form id="create-form" onSubmit={handleCreate} className="py-12 max-w-4xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-10">
+
+          <ScrollArea className="flex-1 min-h-0">
+            <form id="create-form" onSubmit={handleCreate} className="p-8 grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
               {columns.map((col) => (
-                <div key={col} className="space-y-4 group">
-                  <Label className="text-[10px] font-black uppercase tracking-[0.25em] text-muted-foreground/60 group-focus-within:text-foreground transition-colors">{col}</Label>
+                <div key={col} className="space-y-2.5 group">
+                  <div className="flex items-center gap-2">
+                    <Label className="text-[10px] font-black uppercase tracking-[0.25em] text-muted-foreground/60 group-focus-within:text-foreground transition-colors">{col}</Label>
+                    {columnTypes[col] && (
+                      <span className="text-[8px] font-mono text-muted-foreground/30 bg-muted/40 px-1.5 py-0.5 rounded border border-foreground/5 uppercase">{columnTypes[col]}</span>
+                    )}
+                    {primaryKey === col && (
+                      <span className="text-[8px] font-mono text-primary/50 bg-primary/5 px-1.5 py-0.5 rounded border border-primary/10 uppercase">PK</span>
+                    )}
+                  </div>
                   <Input
-                    className="h-14 bg-muted/20 border-transparent focus:border-foreground/10 focus:bg-background rounded-2xl px-6 font-mono text-sm transition-all shadow-sm"
-                    placeholder={`Define ${col.toLowerCase()}...`}
+                    className="h-11 bg-muted/20 border-transparent focus:border-foreground/10 focus:bg-background rounded-xl px-4 font-mono text-sm transition-all"
+                    placeholder={`Enter ${col.toLowerCase()}...`}
                     value={formData[col] || ""}
                     onChange={(e) => setFormData({ ...formData, [col]: e.target.value })}
                   />
                 </div>
               ))}
             </form>
-            <div className="h-24" />
           </ScrollArea>
 
-          <div className="px-10 py-8 border-t bg-muted/5 flex items-center justify-end gap-4">
-             <Button variant="ghost" onClick={() => setIsCreateOpen(false)} className="h-14 px-8 rounded-2xl font-black uppercase tracking-widest opacity-40 hover:opacity-100">Cancel</Button>
-             <Button 
-                form="create-form" 
-                disabled={isOperationLoading} 
-                className="h-14 px-10 rounded-2xl bg-foreground text-background hover:bg-foreground/90 font-black uppercase tracking-widest shadow-xl flex items-center gap-3 active:scale-95 transition-all"
-              >
-                {isOperationLoading ? <Loader2 className="size-5 animate-spin" /> : <Save className="size-5" />}
-                Persist Record
-             </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={isEditOpen} onOpenChange={setIsEditOpen}>
-        <DialogContent className="max-w-none w-screen h-screen top-0 flex flex-col p-0 bg-background border-none rounded-none overflow-hidden shadow-2xl" showCloseButton={false}>
-          <div className="px-10 py-8 border-b bg-muted/5 flex items-center justify-between">
-            <div className="flex flex-col gap-1">
-              <DialogHeader className="p-0">
-                <DialogTitle className="text-2xl font-black uppercase tracking-tighter">Refine Record</DialogTitle>
-                <DialogDescription className="text-[10px] font-bold uppercase tracking-[0.3em] opacity-40">Modifying internal matrix for {urlTableName}</DialogDescription>
-              </DialogHeader>
-            </div>
-            <Button variant="ghost" size="icon" onClick={() => setIsEditOpen(false)} className="rounded-full size-12 hover:bg-foreground/5">
-              <X className="size-6" />
+          <div className="px-8 py-5 border-t bg-muted/5 flex items-center justify-end gap-3 shrink-0">
+            <Button variant="ghost" onClick={() => setIsCreateOpen(false)} className="h-11 px-6 rounded-xl font-black uppercase tracking-widest text-[10px] opacity-50 hover:opacity-100">Cancel</Button>
+            <Button
+              type="button"
+              onClick={performCreate}
+              disabled={isOperationLoading}
+              className="h-11 px-8 rounded-xl bg-foreground text-background hover:bg-foreground/90 font-black uppercase tracking-widest text-[10px] shadow-lg flex items-center gap-2.5 active:scale-95 transition-all"
+            >
+              {isOperationLoading ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+              Save Row
             </Button>
           </div>
-          
-          <ScrollArea className="flex-1 min-h-0 px-10">
-            <form id="edit-form" onSubmit={handleUpdate} className="py-12 max-w-4xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-10">
-              {columns.map((col) => (
-                <div key={col} className="space-y-4 group">
-                  <Label className="text-[10px] font-black uppercase tracking-[0.25em] text-muted-foreground/60 group-focus-within:text-foreground transition-colors">{col}</Label>
-                  {typeof formData[col] === 'string' && formData[col].length > 100 ? (
-                    <Textarea 
-                      className="min-h-37.5 bg-muted/20 border-transparent focus:border-foreground/10 focus:bg-background rounded-2xl px-6 py-4 font-mono text-sm transition-all shadow-sm"
-                      value={formData[col] || ""}
-                      onChange={(e) => setFormData({ ...formData, [col]: e.target.value })}
-                    />
-                  ) : (
-                    <Input
-                      className="h-14 bg-muted/20 border-transparent focus:border-foreground/10 focus:bg-background rounded-2xl px-6 font-mono text-sm transition-all shadow-sm"
-                      value={formData[col] === null ? "" : formData[col]}
-                      onChange={(e) => setFormData({ ...formData, [col]: e.target.value })}
-                    />
-                  )}
-                </div>
-              ))}
-            </form>
-            <div className="h-24" />
-          </ScrollArea>
-
-          <div className="px-10 py-8 border-t bg-muted/5 flex items-center justify-end gap-4">
-             <Button variant="ghost" onClick={() => setIsEditOpen(false)} className="h-14 px-8 rounded-2xl font-black uppercase tracking-widest opacity-40 hover:opacity-100">Cancel</Button>
-             <Button 
-                form="edit-form" 
-                disabled={isOperationLoading} 
-                className="h-14 px-10 rounded-2xl bg-foreground text-background hover:bg-foreground/90 font-black uppercase tracking-widest shadow-xl flex items-center gap-3 active:scale-95 transition-all"
-              >
-                {isOperationLoading ? <Loader2 className="size-5 animate-spin" /> : <Save className="size-5" />}
-                Sync Changes
-             </Button>
-          </div>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={isDeleteOpen} onOpenChange={setIsDeleteOpen}>
-        <DialogContent className="max-w-none w-screen h-screen top-0 flex flex-col p-0 bg-background/40 backdrop-blur-3xl border-none rounded-none overflow-hidden shadow-2xl" showCloseButton={false}>
-          <div className="flex-1 flex flex-col items-center justify-center p-12 text-center max-w-2xl mx-auto">
-            <div className="size-24 rounded-full bg-destructive/10 flex items-center justify-center mb-8 border border-destructive/20 shadow-[0_0_50px_-10px_rgba(239,68,68,0.3)]">
-              <AlertTriangle className="size-10 text-destructive animate-pulse" />
+      {/* Row Modal — Preview / Edit / Delete tabs */}
+      <Dialog open={isRowModalOpen} onOpenChange={setIsRowModalOpen}>
+        <DialogContent className="w-screen h-screen max-w-none max-h-none flex flex-col p-0 bg-background border-0 rounded-none overflow-hidden" showCloseButton={false}>
+          <DialogTitle className="sr-only">{urlTableName}</DialogTitle>
+          <Tabs
+            value={rowModalTab}
+            onValueChange={(val) => setRowModalTab(val as "preview" | "edit" | "delete")}
+            className="flex flex-col flex-1 min-h-0"
+          >
+            {/* Combined header + tabs row */}
+            <div className="p-6 border-b bg-muted/5 flex items-center justify-between shrink-0">
+              <TabsList variant="line" className="gap-6 h-auto p-0 bg-transparent w-auto rounded-none">
+                <TabsTrigger value="preview" className="gap-2 py-4 rounded-none text-[11px] font-black uppercase tracking-widest border-b-2 border-transparent data-active:border-foreground data-active:text-foreground">
+                  <Eye className="size-3.5" />
+                  Preview
+                </TabsTrigger>
+                <TabsTrigger value="edit" className="gap-2 py-4 rounded-none text-[11px] font-black uppercase tracking-widest border-b-2 border-transparent data-active:border-foreground data-active:text-foreground">
+                  <Edit className="size-3.5" />
+                  Edit
+                </TabsTrigger>
+                <TabsTrigger value="delete" className="gap-2 py-4 rounded-none text-[11px] font-black uppercase tracking-widest border-b-2 border-transparent data-active:border-destructive data-active:text-destructive">
+                  <Trash2 className="size-3.5" />
+                  Delete
+                </TabsTrigger>
+              </TabsList>
+              <div className="flex items-center gap-2 shrink-0 ml-4">
+                <span className="text-[10px] font-black uppercase tracking-[0.2em] bg-foreground/5 border border-foreground/10 px-3 py-1.5 rounded-lg text-foreground/70">
+                  {urlTableName}
+                </span>
+                {primaryKey && activeRow && (
+                  <span className="text-[9px] font-mono text-muted-foreground/40 bg-muted/30 border border-foreground/5 px-2.5 py-1.5 rounded-lg">
+                    {primaryKey} = {activeRow[primaryKey]}
+                  </span>
+                )}
+                <Button variant="ghost" size="icon" onClick={() => setIsRowModalOpen(false)} className="rounded-xl size-9 hover:bg-foreground/5 ml-1">
+                  <X className="size-5" />
+                </Button>
+              </div>
             </div>
-            <DialogHeader className="p-0 text-center">
-              <DialogTitle className="text-4xl font-black uppercase tracking-tighter mb-4">Irreversible Action</DialogTitle>
-              <DialogDescription className="text-sm font-bold uppercase tracking-[0.2em] opacity-60 leading-relaxed">
-                You are about to purge this record from the cluster. This action will permanently delete all associated data from <span className="text-foreground border-b border-foreground/20">{urlTableName}</span>.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="mt-12 flex items-center gap-4 w-full">
-              <Button 
-                variant="ghost" 
-                onClick={() => setIsDeleteOpen(false)} 
-                className="flex-1 h-16 rounded-2xl font-black uppercase tracking-widest opacity-40 hover:opacity-100 hover:bg-foreground/5 transition-all"
-              >
-                Abort Action
-              </Button>
-              <Button 
-                onClick={handleDelete} 
-                disabled={isOperationLoading}
-                className="flex-1 h-16 rounded-2xl bg-destructive text-destructive-foreground hover:bg-destructive/90 font-black uppercase tracking-widest shadow-2xl shadow-destructive/20 flex items-center gap-3 active:scale-95 transition-all border border-destructive/50"
-              >
-                {isOperationLoading ? <Loader2 className="size-5 animate-spin" /> : <Trash2 className="size-5" />}
-                Confirm Purge
-              </Button>
-            </div>
-          </div>
+
+            {/* Preview Tab */}
+            <TabsContent value="preview" className="flex-1 min-h-0 overflow-hidden">
+              <ScrollArea className="h-full">
+                <div className="p-8 max-w-5xl mx-auto">
+                  <div className="flex items-center justify-end mb-4">
+                    <Button
+                      onClick={() => copyToClipboard(formatCellValue(activeRow, true), 'row-preview')}
+                      variant="outline"
+                      className="h-9 px-4 rounded-lg font-black uppercase tracking-widest text-[10px] gap-2 border-foreground/10 hover:bg-muted transition-all"
+                    >
+                      {copiedId === 'row-preview' ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5 opacity-40" />}
+                      Copy JSON
+                    </Button>
+                  </div>
+                  <div className="bg-muted/20 rounded-xl p-6 border border-foreground/5">
+                    <pre className="font-mono text-xs leading-relaxed selection:bg-primary/30 whitespace-pre-wrap break-all">
+                      {activeRow ? formatCellValue(activeRow, true) : ""}
+                    </pre>
+                  </div>
+                </div>
+              </ScrollArea>
+            </TabsContent>
+
+            {/* Edit Tab */}
+            <TabsContent value="edit" className="flex-1 min-h-0 overflow-hidden flex flex-col">
+              <ScrollArea className="flex-1 min-h-0">
+                <form
+                  id="edit-form"
+                  onSubmit={handleUpdate}
+                  className="p-8 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-8 gap-y-6 max-w-7xl mx-auto w-full"
+                >
+                  {columns.map((col) => {
+                    const colType = (columnTypes[col] || "").toLowerCase();
+                    const isPK = primaryKey === col;
+                    const isBool = colType === "boolean";
+                    const isNumeric = /^(integer|bigint|smallint|int4|int8|int2|numeric|decimal|real|double precision|float4|float8)/.test(colType);
+                    const isJson = colType === "json" || colType === "jsonb";
+                    const isLongText = colType === "text" || (typeof formData[col] === "string" && (formData[col] as string).length > 80);
+                    const rawVal = formData[col];
+                    const displayVal = rawVal === null || rawVal === undefined ? "" : typeof rawVal === "object" ? JSON.stringify(rawVal, null, 2) : String(rawVal);
+                    const isModified = JSON.stringify(formData[col]) !== JSON.stringify(activeRow?.[col]);
+                    const isWide = isJson || isLongText;
+
+                    return (
+                      <div
+                        key={col}
+                        className={cn(
+                          "space-y-2.5 group",
+                          isPK && "opacity-50",
+                          isWide && "sm:col-span-2 lg:col-span-2"
+                        )}
+                      >
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <Label className={cn(
+                            "text-[10px] font-black uppercase tracking-[0.2em] transition-colors",
+                            isModified && !isPK ? "text-amber-400" : "text-muted-foreground/50 group-focus-within:text-foreground"
+                          )}>
+                            {col}
+                          </Label>
+                          {columnTypes[col] && (
+                            <span className="text-[8px] font-mono text-muted-foreground/30 bg-muted/40 px-1.5 py-0.5 rounded border border-foreground/5 uppercase">
+                              {columnTypes[col]}
+                            </span>
+                          )}
+                          {isPK && (
+                            <span className="text-[8px] font-mono text-primary/60 bg-primary/5 px-1.5 py-0.5 rounded border border-primary/10 uppercase">
+                              PK · read-only
+                            </span>
+                          )}
+                          {isModified && !isPK && (
+                            <span className="text-[8px] font-mono text-amber-400/80 bg-amber-400/10 px-1.5 py-0.5 rounded border border-amber-400/20 uppercase">
+                              modified
+                            </span>
+                          )}
+                        </div>
+
+                        {isPK ? (
+                          <Input
+                            readOnly
+                            className="h-11 bg-transparent border-foreground/5 rounded-xl px-4 font-mono text-sm cursor-not-allowed select-none"
+                            value={displayVal}
+                          />
+                        ) : isBool ? (
+                          <Select
+                            value={rawVal === null || rawVal === undefined ? "__null__" : String(rawVal)}
+                            onValueChange={(v) => setFormData((prev: any) => ({ ...prev, [col]: v === "__null__" ? null : v === "true" }))}
+                          >
+                            <SelectTrigger className="h-11 bg-muted/20 border-transparent focus:border-foreground/10 rounded-xl font-mono text-sm">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent className="rounded-xl border-foreground/10 bg-background/95 backdrop-blur-xl">
+                              <SelectItem value="true" className="font-mono text-sm cursor-pointer">true</SelectItem>
+                              <SelectItem value="false" className="font-mono text-sm cursor-pointer">false</SelectItem>
+                              <SelectItem value="__null__" className="font-mono text-sm text-muted-foreground cursor-pointer">NULL</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        ) : isJson || isLongText ? (
+                          <Textarea
+                            className="min-h-28 bg-muted/20 border-transparent focus:border-foreground/10 focus:bg-background rounded-xl px-4 py-3 font-mono text-xs transition-all resize-y"
+                            value={displayVal}
+                            onChange={(e) => setFormData((prev: any) => ({ ...prev, [col]: e.target.value }))}
+                            placeholder={rawVal === null ? "NULL — leave empty to set null" : undefined}
+                          />
+                        ) : (
+                          <Input
+                            type={isNumeric ? "number" : "text"}
+                            className="h-11 bg-muted/20 border-transparent focus:border-foreground/10 focus:bg-background rounded-xl px-4 font-mono text-sm transition-all"
+                            value={displayVal}
+                            onChange={(e) => setFormData((prev: any) => ({ ...prev, [col]: e.target.value }))}
+                            placeholder={rawVal === null ? "NULL" : undefined}
+                          />
+                        )}
+                      </div>
+                    );
+                  })}
+                </form>
+              </ScrollArea>
+              <div className="px-8 py-5 border-t bg-muted/5 flex items-center justify-between shrink-0">
+                <span className="text-[10px] font-mono text-muted-foreground/30">
+                  {Object.keys(formData).filter(k => k !== primaryKey && JSON.stringify(formData[k]) !== JSON.stringify(activeRow?.[k])).length} field(s) modified
+                </span>
+                <div className="flex items-center gap-3">
+                  <Button
+                    variant="ghost"
+                    onClick={() => setIsRowModalOpen(false)}
+                    className="h-11 px-6 rounded-xl font-black uppercase tracking-widest text-[10px] opacity-50 hover:opacity-100"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    onClick={performUpdate}
+                    disabled={isOperationLoading}
+                    className="h-11 px-8 rounded-xl bg-foreground text-background hover:bg-foreground/90 font-black uppercase tracking-widest text-[10px] shadow-lg flex items-center gap-2.5 active:scale-95 transition-all"
+                  >
+                    {isOperationLoading ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+                    Save Changes
+                  </Button>
+                </div>
+              </div>
+            </TabsContent>
+
+            {/* Delete Tab */}
+            <TabsContent value="delete" className="flex-1 min-h-0 flex items-center justify-center p-8">
+              <div className="flex flex-col items-center text-center gap-6 max-w-sm w-full">
+                <div className="size-16 rounded-2xl bg-destructive/10 flex items-center justify-center border border-destructive/20">
+                  <AlertTriangle className="size-8 text-destructive" />
+                </div>
+                <div className="space-y-2">
+                  <p className="text-xl font-black uppercase tracking-tighter">Delete Row</p>
+                  <p className="text-sm text-muted-foreground leading-relaxed">
+                    Permanently delete this record from <strong className="text-foreground">{urlTableName}</strong>? This cannot be undone.
+                  </p>
+                  {primaryKey && activeRow && (
+                    <p className="text-[10px] font-mono text-muted-foreground/50 mt-1">{primaryKey} = {activeRow[primaryKey]}</p>
+                  )}
+                </div>
+                <div className="flex items-center gap-3 w-full">
+                  <Button
+                    variant="outline"
+                    onClick={() => setIsRowModalOpen(false)}
+                    className="flex-1 h-11 rounded-xl font-black uppercase tracking-widest text-[10px] border-foreground/10"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={handleDelete}
+                    disabled={isOperationLoading}
+                    className="flex-1 h-11 rounded-xl bg-destructive text-destructive-foreground hover:bg-destructive/90 font-black uppercase tracking-widest text-[10px] flex items-center justify-center gap-2 active:scale-95 transition-all"
+                  >
+                    {isOperationLoading ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                    Delete
+                  </Button>
+                </div>
+              </div>
+            </TabsContent>
+          </Tabs>
         </DialogContent>
       </Dialog>
 
@@ -820,7 +1016,7 @@ export default function Explorer() {
               <AlertTriangle className="size-10 text-destructive animate-pulse" />
             </div>
             <DialogHeader className="p-0 text-center">
-              <DialogTitle className="text-4xl font-black uppercase tracking-tighter mb-4">Total Purge</DialogTitle>
+              <DialogTitle className="text-4xl font-black uppercase tracking-tighter mb-4">Truncate Table</DialogTitle>
               <DialogDescription className="text-sm font-bold uppercase tracking-[0.2em] opacity-60 leading-relaxed">
                 CRITICAL: You are about to <span className="text-destructive font-black underline">TRUNCATE</span> all data from <span className="text-foreground border-b border-foreground/20">{urlTableName}</span>. This will permanently remove <span className="font-black text-foreground">{paginationInfo?.totalRows}</span> records.
               </DialogDescription>
@@ -831,56 +1027,21 @@ export default function Explorer() {
                 onClick={() => setIsTruncateOpen(false)} 
                 className="flex-1 h-16 rounded-2xl font-black uppercase tracking-widest opacity-40 hover:opacity-100 hover:bg-foreground/5 transition-all"
               >
-                Abort Operation
+                Cancel
               </Button>
-              <Button 
-                onClick={handleTruncate} 
+              <Button
+                onClick={handleTruncate}
                 disabled={isOperationLoading}
                 className="flex-1 h-16 rounded-2xl bg-destructive text-destructive-foreground hover:bg-destructive/90 font-black uppercase tracking-widest shadow-2xl shadow-destructive/20 flex items-center gap-3 active:scale-95 transition-all border border-destructive/50"
               >
                 {isOperationLoading ? <Loader2 className="size-5 animate-spin" /> : <X className="size-5" />}
-                Purge Table
+                Truncate
               </Button>
             </div>
           </div>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={isPreviewOpen} onOpenChange={setIsPreviewOpen}>
-        <DialogContent className="min-w-full h-full flex flex-col p-0 bg-background/95 backdrop-blur-3xl border-foreground/10 overflow-hidden shadow-2xl" showCloseButton={false}>
-          <div className="px-8 py-6 border-b bg-muted/10 flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div className="size-10 rounded-xl bg-foreground/5 flex items-center justify-center border border-foreground/10">
-                <Maximize2 className="size-5 opacity-40" />
-              </div>
-              <div className="flex flex-col">
-                <DialogTitle className="text-lg font-black uppercase tracking-tighter">{previewData?.colName}</DialogTitle>
-                <span className="text-[9px] font-bold uppercase tracking-widest opacity-30">Analytical View • Record Index {previewData?.rowIndex}</span>
-              </div>
-            </div>
-            <Button variant="ghost" size="icon" onClick={() => setIsPreviewOpen(false)} className="rounded-full size-10 hover:bg-foreground/5">
-              <X className="size-5" />
-            </Button>
-          </div>
-          <ScrollArea className="flex-1 p-8">
-            <div className="bg-muted/20 rounded-2xl p-8 border border-foreground/5 shadow-inner">
-               <pre className="font-mono text-xs leading-relaxed overflow-x-auto selection:bg-primary/30 whitespace-pre-wrap break-all">
-                {previewData ? formatCellValue(previewData.val, true) : ""}
-              </pre>
-            </div>
-            <div className="mt-8 flex items-center gap-4">
-              <Button 
-                onClick={() => copyToClipboard(formatCellValue(previewData?.val, true), 'preview')}
-                variant="outline"
-                className="h-12 px-6 rounded-xl font-black uppercase tracking-widest text-[10px] gap-3 border-foreground/5 hover:bg-muted transition-all"
-              >
-                {copiedId === 'preview' ? <Check className="size-4 text-success" /> : <Copy className="size-4 opacity-40" />}
-                Copy Manifest
-              </Button>
-            </div>
-          </ScrollArea>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

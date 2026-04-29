@@ -1,5 +1,9 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { Terminal, Cpu, Loader2, LayoutDashboard, History, Trash2, Clock, Download, X } from "lucide-react";
+import {
+  Terminal, Loader2, LayoutDashboard, History, Trash2,
+  Download, X, Play, Database, Zap, AlertCircle,
+  FileText, Hash, Timer, ChevronRight, CheckCircle2,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -28,6 +32,14 @@ function saveHistory(h: HistoryEntry[]) {
   localStorage.setItem(HISTORY_KEY, JSON.stringify(h.slice(0, MAX_HISTORY)));
 }
 
+const SQL_SNIPPETS = [
+  { label: "SELECT *", template: "SELECT * FROM " },
+  { label: "WHERE", template: " WHERE " },
+  { label: "JOIN", template: " INNER JOIN  ON " },
+  { label: "GROUP BY", template: " GROUP BY " },
+  { label: "ORDER BY", template: " ORDER BY  DESC" },
+];
+
 export default function SqlLab() {
   const { socket } = useSocket();
   const [rawQuery, setRawQuery] = useState("");
@@ -38,6 +50,7 @@ export default function SqlLab() {
   const [showHistory, setShowHistory] = useState(false);
   const [lastDuration, setLastDuration] = useState<number | null>(null);
   const startTimeRef = useRef<number>(0);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     if (!socket) return;
@@ -87,6 +100,18 @@ export default function SqlLab() {
       e.preventDefault();
       runSqlLab();
     }
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const start = e.currentTarget.selectionStart;
+      const end = e.currentTarget.selectionEnd;
+      const newVal = rawQuery.substring(0, start) + "  " + rawQuery.substring(end);
+      setRawQuery(newVal);
+      setTimeout(() => {
+        if (textareaRef.current) {
+          textareaRef.current.selectionStart = textareaRef.current.selectionEnd = start + 2;
+        }
+      }, 0);
+    }
   };
 
   const exportCsv = () => {
@@ -111,59 +136,101 @@ export default function SqlLab() {
     setHistory([]);
   };
 
+  const insertSnippet = (template: string) => {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      setRawQuery(prev => prev + template);
+      return;
+    }
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const newVal = rawQuery.substring(0, start) + template + rawQuery.substring(end);
+    setRawQuery(newVal);
+    setTimeout(() => {
+      textarea.focus();
+      textarea.selectionStart = textarea.selectionEnd = start + template.length;
+    }, 0);
+  };
+
+  const lineCount = rawQuery ? rawQuery.split("\n").length : 1;
+
   return (
-    <div className="flex-1 flex flex-col gap-4 min-h-0 p-4">
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 flex-1 min-h-0">
-        {/* Left: Editor + History */}
-        <div className="lg:col-span-1 flex flex-col gap-4 min-h-0">
-          <Card className="flex-1 border-muted-foreground/10 bg-card/40 backdrop-blur-2xl rounded-3xl overflow-hidden flex flex-col">
-            <div className="p-4 border-b bg-muted/20 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Terminal className="size-4 animate-pulse text-muted-foreground" />
-                <h3 className="text-xs font-black uppercase tracking-widest">Compiler Interface</h3>
+    <div className="flex-1 flex flex-col min-h-0 p-4">
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 flex-1 min-h-0">
+
+        {/* ─── Left: Editor ─── */}
+        <div className="lg:col-span-2 flex flex-col min-h-0">
+          <Card className="flex-1 border border-border/50 bg-card/40 backdrop-blur-2xl rounded-2xl overflow-hidden flex flex-col shadow-lg">
+
+            {/* Editor header */}
+            <div className="px-4 py-3 border-b border-border/40 bg-gradient-to-r from-muted/40 to-transparent flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="size-6 rounded-lg bg-primary/15 flex items-center justify-center">
+                  <Terminal className="size-3.5 text-primary" />
+                </div>
+                <span className="text-[11px] font-bold uppercase tracking-[0.15em] text-foreground/75">SQL Editor</span>
               </div>
-              <div className="flex items-center gap-1">
-                <Badge variant="outline" className="text-[9px] h-5 px-2 font-bold opacity-50 uppercase">Ctrl+↵ Run</Badge>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="size-7 rounded-lg"
+              <div className="flex items-center gap-2">
+                <Badge variant="outline" className="text-[9px] h-5 px-2 font-semibold opacity-35 uppercase tracking-wide border-foreground/10">
+                  Ctrl+↵
+                </Badge>
+                <button
+                  className={cn(
+                    "size-7 rounded-lg flex items-center justify-center transition-colors hover:bg-muted/60",
+                    showHistory ? "bg-primary/15 text-primary" : "text-muted-foreground/50"
+                  )}
                   onClick={() => setShowHistory(v => !v)}
                   title="Query History"
                 >
-                  <History className={cn("size-3.5", showHistory && "text-primary")} />
-                </Button>
+                  <History className="size-3.5" />
+                </button>
               </div>
             </div>
 
             {showHistory ? (
+              /* ── History panel ── */
               <div className="flex-1 flex flex-col min-h-0">
-                <div className="px-4 py-2 border-b flex items-center justify-between">
-                  <span className="text-[9px] font-black uppercase tracking-widest text-muted-foreground/50">Last {history.length} Queries</span>
+                <div className="px-4 py-2 border-b border-border/30 flex items-center justify-between bg-muted/5 shrink-0">
+                  <span className="text-[9px] font-bold uppercase tracking-[0.2em] text-muted-foreground/40">
+                    {history.length} saved queries
+                  </span>
                   {history.length > 0 && (
-                    <Button variant="ghost" size="icon" className="size-6 rounded-lg" onClick={clearHistory}>
+                    <button
+                      className="size-6 rounded-md flex items-center justify-center hover:bg-destructive/10 transition-colors"
+                      onClick={clearHistory}
+                      title="Clear history"
+                    >
                       <Trash2 className="size-3 text-destructive/60" />
-                    </Button>
+                    </button>
                   )}
                 </div>
                 <ScrollArea className="flex-1">
-                  <div className="p-2 space-y-1.5">
+                  <div className="p-2.5 space-y-1.5">
                     {history.length === 0 && (
-                      <p className="text-[9px] text-muted-foreground/30 uppercase tracking-widest text-center py-8">No history yet</p>
+                      <div className="flex flex-col items-center py-12">
+                        <FileText className="size-8 opacity-10 mb-3" />
+                        <p className="text-[9px] text-muted-foreground/25 uppercase tracking-widest">No history yet</p>
+                      </div>
                     )}
                     {history.map((entry, i) => (
                       <div
                         key={i}
-                        className="p-3 rounded-xl border border-foreground/5 bg-muted/10 cursor-pointer hover:bg-muted/20 transition-colors"
+                        className="group p-3 rounded-xl border border-foreground/5 bg-muted/10 cursor-pointer hover:bg-primary/5 hover:border-primary/15 transition-all"
                         onClick={() => { setRawQuery(entry.query); setShowHistory(false); }}
                       >
-                        <p className="font-mono text-[10px] line-clamp-2 text-foreground/70">{entry.query}</p>
-                        <div className="flex items-center gap-2 mt-1.5">
+                        <p className="font-mono text-[10px] line-clamp-2 text-foreground/65 group-hover:text-foreground/85 transition-colors leading-relaxed">
+                          {entry.query}
+                        </p>
+                        <div className="flex items-center gap-3 mt-2">
                           <span className="text-[8px] text-muted-foreground/40 flex items-center gap-1">
-                            <Clock className="size-2.5" />{entry.durationMs}ms
+                            <Timer className="size-2.5" />{entry.durationMs}ms
                           </span>
-                          <span className="text-[8px] text-muted-foreground/40">{entry.rowCount} rows</span>
-                          <span className="text-[8px] text-muted-foreground/30 ml-auto">{new Date(entry.executedAt).toLocaleTimeString()}</span>
+                          <span className="text-[8px] text-muted-foreground/40 flex items-center gap-1">
+                            <Hash className="size-2.5" />{entry.rowCount} rows
+                          </span>
+                          <span className="text-[8px] text-muted-foreground/25 ml-auto">
+                            {new Date(entry.executedAt).toLocaleTimeString()}
+                          </span>
                         </div>
                       </div>
                     ))}
@@ -171,81 +238,196 @@ export default function SqlLab() {
                 </ScrollArea>
               </div>
             ) : (
-              <div className="flex-1 p-4 flex flex-col min-h-0">
-                <textarea
-                  placeholder="SELECT TOP 100 * FROM your_table...&#10;&#10;Ctrl+Enter to execute"
-                  value={rawQuery}
-                  onChange={(e) => setRawQuery(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  className="flex-1 w-full bg-muted/30 border-none rounded-2xl p-4 font-mono text-sm resize-none focus:ring-1 focus:ring-foreground/20 outline-none transition-all min-h-[200px]"
-                />
-                <Button
-                  onClick={runSqlLab}
-                  disabled={isQuerying || !rawQuery.trim()}
-                  className="mt-4 w-full h-11 rounded-2xl font-black uppercase tracking-widest bg-foreground text-background hover:bg-foreground/90 shadow-xl"
-                >
-                  {isQuerying ? <Loader2 className="size-4 animate-spin mr-2" /> : <Cpu className="size-4 mr-2" />}
-                  Execute Script
-                </Button>
+              /* ── Editor panel ── */
+              <div className="flex-1 flex flex-col min-h-0">
+
+                {/* Snippet toolbar */}
+                <div className="px-3 py-2 border-b border-border/20 flex items-center gap-1.5 bg-muted/5 flex-wrap shrink-0">
+                  {SQL_SNIPPETS.map(s => (
+                    <button
+                      key={s.label}
+                      onClick={() => insertSnippet(s.template)}
+                      className="text-[9px] font-mono font-bold px-2 py-1 rounded-md bg-muted/30 hover:bg-primary/10 hover:text-primary border border-transparent hover:border-primary/20 transition-all tracking-wide text-muted-foreground/50"
+                    >
+                      {s.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Code editor area */}
+                <div className="flex-1 relative min-h-0 bg-black/[0.06] dark:bg-black/25">
+                  <textarea
+                    ref={textareaRef}
+                    placeholder={"SELECT *\nFROM your_table\nWHERE condition = 'value'\nLIMIT 100;"}
+                    value={rawQuery}
+                    onChange={(e) => setRawQuery(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    spellCheck={false}
+                    autoComplete="off"
+                    autoCorrect="off"
+                    className="absolute inset-0 w-full h-full bg-transparent border-none p-4 font-mono text-[13px] leading-[1.7] resize-none outline-none text-foreground/90 placeholder:text-muted-foreground/20 selection:bg-primary/20"
+                  />
+                </div>
+
+                {/* Status bar */}
+                <div className="px-4 py-1.5 border-t border-border/15 bg-muted/10 flex items-center justify-between shrink-0">
+                  <div className="flex items-center gap-3">
+                    <span className="text-[9px] font-mono text-muted-foreground/30">
+                      {lineCount} {lineCount === 1 ? "line" : "lines"}
+                    </span>
+                    <span className="text-[9px] font-mono text-muted-foreground/20 hidden sm:block">SQL</span>
+                  </div>
+                  {rawQuery && (
+                    <button
+                      onClick={() => setRawQuery("")}
+                      className="text-[9px] text-muted-foreground/25 hover:text-muted-foreground/60 transition-colors"
+                    >
+                      clear
+                    </button>
+                  )}
+                </div>
+
+                {/* Execute button */}
+                <div className="p-3 border-t border-border/20 shrink-0">
+                  <Button
+                    onClick={runSqlLab}
+                    disabled={isQuerying || !rawQuery.trim()}
+                    className={cn(
+                      "w-full h-10 rounded-xl font-bold uppercase tracking-[0.1em] text-[11px] transition-all gap-2",
+                      !isQuerying && rawQuery.trim()
+                        ? "bg-primary hover:bg-primary/90 text-primary-foreground shadow-lg shadow-primary/20"
+                        : ""
+                    )}
+                  >
+                    {isQuerying
+                      ? <><Loader2 className="size-3.5 animate-spin" />Executing...</>
+                      : <><Play className="size-3.5 fill-current" />Run Query</>
+                    }
+                  </Button>
+                </div>
               </div>
             )}
           </Card>
         </div>
 
-        {/* Right: Results */}
-        <div className="lg:col-span-2 min-h-0">
-          <Card className="h-full border-muted-foreground/10 bg-card/60 backdrop-blur-2xl rounded-3xl overflow-hidden flex flex-col">
-            <div className="p-4 border-b bg-muted/20 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <LayoutDashboard className="size-4 text-muted-foreground" />
-                <h3 className="text-xs font-black uppercase tracking-widest">Output Registry</h3>
-              </div>
-              <div className="flex items-center gap-3">
-                {lastDuration !== null && queryResult && (
-                  <span className="text-[9px] font-mono opacity-40 flex items-center gap-1">
-                    <Clock className="size-3" />{lastDuration}ms
-                  </span>
-                )}
+        {/* ─── Right: Results ─── */}
+        <div className="lg:col-span-3 min-h-0 flex flex-col">
+          <Card className="flex-1 border border-border/50 bg-card/40 backdrop-blur-2xl rounded-2xl overflow-hidden flex flex-col shadow-lg">
+
+            {/* Results header */}
+            <div className="px-4 py-3 border-b border-border/40 bg-gradient-to-r from-muted/40 to-transparent flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="size-6 rounded-lg bg-muted/50 flex items-center justify-center">
+                  <LayoutDashboard className="size-3.5 text-muted-foreground/70" />
+                </div>
+                <span className="text-[11px] font-bold uppercase tracking-[0.15em] text-foreground/75">Results</span>
                 {queryResult && (
-                  <span className="text-[10px] font-bold opacity-40 uppercase tracking-widest">
-                    {queryResult.rows.length} Records
+                  <div className="flex items-center gap-1.5 ml-0.5">
+                    <Badge className="text-[9px] h-5 px-1.5 bg-success/15 text-success border-success/25 font-bold">
+                      {queryResult.rows.length} rows
+                    </Badge>
+                    <Badge variant="outline" className="text-[9px] h-5 px-1.5 font-semibold opacity-45 border-foreground/10">
+                      {queryResult.columns.length} cols
+                    </Badge>
+                  </div>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {lastDuration !== null && queryResult && (
+                  <span className="text-[9px] font-mono text-muted-foreground/40 flex items-center gap-1">
+                    <Zap className="size-3 text-warning/50" />{lastDuration}ms
                   </span>
                 )}
                 {queryResult && queryResult.rows.length > 0 && (
-                  <Button variant="ghost" size="icon" className="size-7 rounded-lg opacity-60 hover:opacity-100" onClick={exportCsv} title="Export CSV">
-                    <Download className="size-3.5" />
-                  </Button>
+                  <button
+                    onClick={exportCsv}
+                    className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-wide text-muted-foreground/45 hover:text-foreground/75 transition-all px-2 py-1 rounded-lg hover:bg-muted/40 border border-transparent hover:border-border/30"
+                    title="Export CSV"
+                  >
+                    <Download className="size-3" />
+                    Export
+                  </button>
                 )}
                 {(queryResult || error) && (
-                  <Button variant="ghost" size="icon" className="size-7 rounded-lg opacity-60 hover:opacity-100" onClick={() => { setQueryResult(null); setError(null); setLastDuration(null); }}>
-                    <X className="size-3.5" />
-                  </Button>
+                  <button
+                    className="size-6 rounded-lg flex items-center justify-center hover:bg-muted/50 transition-colors text-muted-foreground/35 hover:text-foreground/60"
+                    onClick={() => { setQueryResult(null); setError(null); setLastDuration(null); }}
+                    title="Clear results"
+                  >
+                    <X className="size-3" />
+                  </button>
                 )}
               </div>
             </div>
+
+            {/* Results body */}
             <div className="flex-1 overflow-hidden relative">
               {isQuerying ? (
-                <div className="absolute inset-0 flex flex-col items-center justify-center bg-background/50 backdrop-blur-sm z-10">
-                  <Cpu className="size-12 opacity-30 animate-spin" />
-                  <span className="mt-6 text-[10px] font-black uppercase tracking-[0.3em] opacity-30 animate-pulse">Processing...</span>
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-5">
+                  <div className="relative">
+                    <div className="size-14 rounded-full border-2 border-primary/15 border-t-primary animate-spin" />
+                    <Database className="absolute inset-0 m-auto size-5 text-primary/40" />
+                  </div>
+                  <div className="text-center">
+                    <p className="text-[10px] font-bold uppercase tracking-[0.25em] text-muted-foreground/45 animate-pulse">
+                      Executing query
+                    </p>
+                    <p className="text-[9px] text-muted-foreground/25 mt-1.5">Awaiting database response…</p>
+                  </div>
                 </div>
               ) : error ? (
-                <div className="p-8 text-destructive font-mono text-sm uppercase">{error}</div>
+                <div className="p-6">
+                  <div className="flex items-start gap-3 p-4 rounded-xl bg-destructive/8 border border-destructive/20">
+                    <AlertCircle className="size-4 text-destructive/70 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-destructive/70 mb-2">Query Error</p>
+                      <p className="font-mono text-[12px] text-destructive/60 leading-relaxed whitespace-pre-wrap">{error}</p>
+                    </div>
+                  </div>
+                </div>
               ) : queryResult ? (
                 <ScrollArea className="h-full">
                   <Table>
-                    <TableHeader className="bg-muted/40 sticky top-0 z-20 backdrop-blur-md">
-                      <TableRow>
+                    <TableHeader className="sticky top-0 z-20">
+                      <TableRow className="border-border/20 bg-muted/40 backdrop-blur-md hover:bg-muted/40">
+                        <TableHead className="text-[9px] font-bold text-muted-foreground/35 w-10 text-center border-r border-border/20 h-9 uppercase tracking-widest">
+                          #
+                        </TableHead>
                         {queryResult.columns.map(c => (
-                          <TableHead key={c} className="text-[10px] font-black uppercase tracking-widest border-r border-muted-foreground/5 h-10 whitespace-nowrap">{c}</TableHead>
+                          <TableHead
+                            key={c}
+                            className="text-[10px] font-bold uppercase tracking-widest border-r border-border/15 last:border-r-0 h-9 whitespace-nowrap text-foreground/55"
+                          >
+                            {c}
+                          </TableHead>
                         ))}
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {queryResult.rows.map((row, i) => (
-                        <TableRow key={i} className="hover:bg-muted/10">
+                        <TableRow
+                          key={i}
+                          className={cn(
+                            "border-border/10 hover:bg-primary/5 transition-colors",
+                            i % 2 === 0 ? "bg-transparent" : "bg-muted/[0.03]"
+                          )}
+                        >
+                          <TableCell className="text-[9px] font-mono text-muted-foreground/25 text-center border-r border-border/10 w-10 select-none">
+                            {i + 1}
+                          </TableCell>
                           {queryResult.columns.map(c => (
-                            <TableCell key={c} className="font-mono text-[11px] border-r border-muted-foreground/5 max-w-xs truncate">{String(row[c] ?? "NULL")}</TableCell>
+                            <TableCell
+                              key={c}
+                              className={cn(
+                                "font-mono text-[11px] border-r border-border/10 last:border-r-0 max-w-[220px] truncate",
+                                row[c] === null
+                                  ? "text-muted-foreground/25 italic"
+                                  : "text-foreground/80"
+                              )}
+                              title={row[c] === null ? "NULL" : String(row[c])}
+                            >
+                              {row[c] === null ? "NULL" : String(row[c])}
+                            </TableCell>
                           ))}
                         </TableRow>
                       ))}
@@ -253,15 +435,46 @@ export default function SqlLab() {
                   </Table>
                 </ScrollArea>
               ) : (
-                <div className="h-full flex flex-col items-center justify-center text-muted-foreground/30 px-12 text-center">
-                  <Terminal className="size-12 mb-4 opacity-10" />
-                  <p className="text-[10px] font-black uppercase tracking-[.2em]">Ready for execution</p>
-                  <p className="text-[9px] mt-2 opacity-50">Press Ctrl+Enter or click Execute</p>
+                /* Empty state */
+                <div className="h-full flex flex-col items-center justify-center gap-5 text-center px-8">
+                  <div className="relative">
+                    <div className="size-16 rounded-2xl bg-muted/20 border border-border/20 flex items-center justify-center">
+                      <Terminal className="size-7 text-muted-foreground/20" />
+                    </div>
+                    <div className="absolute -bottom-1.5 -right-1.5 size-6 rounded-lg bg-card border border-border/30 flex items-center justify-center shadow-sm">
+                      <ChevronRight className="size-3 text-muted-foreground/30" />
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-muted-foreground/35">
+                      Ready for execution
+                    </p>
+                    <p className="text-[10px] text-muted-foreground/22 mt-2 leading-relaxed">
+                      Write a query in the editor<br />
+                      and press <span className="font-mono text-muted-foreground/40">Ctrl+Enter</span> or click Run
+                    </p>
+                  </div>
                 </div>
               )}
             </div>
+
+            {/* Results footer */}
+            {queryResult && (
+              <div className="px-4 py-2 border-t border-border/15 bg-muted/10 flex items-center gap-4 shrink-0">
+                <span className="text-[9px] font-mono text-muted-foreground/30 flex items-center gap-1.5">
+                  <CheckCircle2 className="size-3 text-success/50" />
+                  Query completed
+                </span>
+                {queryResult.executedAt && (
+                  <span className="text-[9px] text-muted-foreground/20">
+                    {new Date(queryResult.executedAt).toLocaleTimeString()}
+                  </span>
+                )}
+              </div>
+            )}
           </Card>
         </div>
+
       </div>
     </div>
   );

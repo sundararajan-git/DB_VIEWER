@@ -2,21 +2,24 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
+@import "@fontsource/ibm-plex-sans";
 
 @custom-variant dark (&:is(.dark *));
 
 @layer utilities {
   .live-pulse {
-      height: 10px; width: 10px; border-radius: 50%; background-color: #10b981;
-      box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
-      animation: pulse 1.5s infinite;
+    @apply size-2.5 rounded-full bg-success;
+    box-shadow: 0 0 0 0 oklch(from var(--success) l c h / 0.7);
+    animation: live-pulse 1.8s ease-in-out infinite;
   }
 }
 
-@keyframes pulse {
-  0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
-  70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+@keyframes live-pulse {
+  0%   { box-shadow: 0 0 0 0   oklch(from var(--success) l c h / 0.6); }
+  70%  { box-shadow: 0 0 0 6px oklch(from var(--success) l c h / 0); }
+  100% { box-shadow: 0 0 0 0   oklch(from var(--success) l c h / 0); }
 }
 
 :root {
@@ -183,20 +186,10 @@
   scrollbar-width: none;
 }
 
-/* Elite Animations */
+/* Soft pulse for skeletons / loading states */
 @keyframes pulse-soft {
   0%, 100% { opacity: 0.1; }
   50% { opacity: 0.3; }
-}
-
-.live-pulse {
-  @apply bg-green-500 rounded-full;
-  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.5; transform: scale(0.8); }
 }
 
 /* Glassmorphic Utilities */
@@ -210,12 +203,13 @@
 
 /* Custom Selection */
 ::selection {
-  @apply bg-foreground text-background;
+  background-color: oklch(from var(--primary) l c h / 0.25);
+  color: inherit;
 }
 
-/* Smooth Table Transitions */
+/* Table row transitions */
 tr {
-  @apply transition-all duration-300;
+  @apply transition-colors duration-100;
 }
 
 /* Hide Scrollbar */

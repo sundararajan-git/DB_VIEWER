@@ -94,6 +94,16 @@ export default function Schema() {
       .then(r => r.json())
       .then(data => {
         if (data.error) throw new Error(data.error);
+        if (Array.isArray(data.indexes)) {
+          data.indexes = data.indexes.map((idx: IndexInfo) => ({
+            ...idx,
+            columns: Array.isArray(idx.columns)
+              ? idx.columns
+              : typeof idx.columns === 'string'
+                ? (idx.columns as string).replace(/^\{|\}$/g, '').split(',').filter(Boolean)
+                : []
+          }));
+        }
         setSchema(data);
         setIsLoading(false);
       })
