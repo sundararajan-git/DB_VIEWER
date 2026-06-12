@@ -29,7 +29,5 @@ yarn-error.log*
 *.swp
 *.scratch
 scratch/
-install_postgres.ps1
-seed_postgres.sql
-postgres_portable/
-
+.claude
+Design/

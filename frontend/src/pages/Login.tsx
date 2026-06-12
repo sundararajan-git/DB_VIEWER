@@ -1,83 +1,114 @@
-import { useState } from "react";
-import { Database, Eye, EyeOff, Lock } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import React, { useState } from "react";
+import { Icon } from "@/components/Core";
 import { useAuth } from "@/context/AuthContext";
 
 export default function Login() {
   const { login } = useAuth();
   const [password, setPassword] = useState("");
-  const [showPwd, setShowPwd] = useState(false);
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setLoading(true);
+    if (!password) {
+      setError("Password is required to continue.");
+      return;
+    }
+    setBusy(true);
     setError(null);
     try {
       await login(password);
     } catch (err: any) {
-      setError(err.message);
+      setError(err.message || "Invalid password");
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
   };
 
   return (
-    <div className="h-screen bg-background flex items-center justify-center p-8">
-      <Card className="w-full max-w-sm shadow-2xl border-border/50 bg-background/60 backdrop-blur-xl">
-        <CardHeader className="text-center space-y-3 pb-6">
-          <div className="flex justify-center">
-            <div className="p-3 bg-foreground text-background rounded-2xl shadow-lg">
-              <Database className="size-7" />
-            </div>
+    <div className="authpage">
+      <form className="card fade-in" onSubmit={handleSubmit} style={{ width: 360, padding: 28, boxShadow: "var(--shadow)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 22 }}>
+          <div
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: 8,
+              background: "var(--accent-soft)",
+              border: "1px solid var(--accent-line)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "var(--accent)",
+            }}
+          >
+            <Icon n="database" s={18} />
           </div>
-          <CardTitle className="text-2xl font-black uppercase tracking-tighter">Ascadis</CardTitle>
-          <CardDescription className="text-[10px] font-bold uppercase tracking-widest opacity-50">Admin Authentication Required</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSubmit} className="space-y-4">
-            {error && (
-              <div className="p-3 bg-destructive/10 border border-destructive/20 text-destructive text-[11px] rounded-xl flex items-center gap-2 font-bold uppercase tracking-wider">
-                <Lock className="size-3.5 shrink-0" />{error}
-              </div>
-            )}
-            <div className="space-y-2">
-              <Label className="text-[10px] font-black uppercase tracking-widest">Admin Password</Label>
-              <div className="relative">
-                <Input
-                  type={showPwd ? "text" : "password"}
-                  value={password}
-                  onChange={e => setPassword(e.target.value)}
-                  placeholder="Enter password..."
-                  className="pr-10 bg-muted/20 border-foreground/10 rounded-xl h-12 font-mono"
-                  required
-                  autoFocus
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="absolute right-2 top-1/2 -translate-y-1/2 size-8 rounded-lg opacity-40 hover:opacity-100"
-                  onClick={() => setShowPwd(v => !v)}
-                >
-                  {showPwd ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                </Button>
-              </div>
-            </div>
-            <Button
-              type="submit"
-              disabled={loading || !password}
-              className="w-full h-12 rounded-xl font-black uppercase tracking-widest bg-foreground text-background hover:bg-foreground/90 shadow-xl"
-            >
-              {loading ? "Authenticating..." : "Access System"}
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 14, letterSpacing: "-.02em" }}>DB Viewer Suite</div>
+            <div className="label">Authentication required</div>
+          </div>
+        </div>
+
+        <label className="label" style={{ display: "block", marginBottom: 7 }}>
+          Admin password
+        </label>
+        <div style={{ position: "relative" }}>
+          <span
+            style={{
+              position: "absolute",
+              left: 11,
+              top: "50%",
+              transform: "translateY(-50%)",
+              color: "var(--text-faint)",
+            }}
+          >
+            <Icon n="lock" s={15} />
+          </span>
+          <input
+            autoFocus
+            type="password"
+            className="field mono"
+            style={{ paddingLeft: 34 }}
+            placeholder="••••••••••••"
+            value={password}
+            onChange={(e) => {
+              setPassword(e.target.value);
+              setError(null);
+            }}
+          />
+        </div>
+
+        {error && (
+          <div className="alert err" style={{ marginTop: 12 }}>
+            <Icon n="alert" s={15} />
+            <span>{error}</span>
+          </div>
+        )}
+
+        <button
+          className="btn primary"
+          type="submit"
+          disabled={busy}
+          style={{ width: "100%", justifyContent: "center", marginTop: 18, padding: "10px" }}
+        >
+          {busy ? (
+            <>
+              <Icon n="refresh" s={15} className="spin" />
+              Signing in…
+            </>
+          ) : (
+            <>
+              Sign In
+              <Icon n="arrowRight" s={15} />
+            </>
+          )}
+        </button>
+
+        <div style={{ marginTop: 16, textAlign: "center", fontSize: 11, color: "var(--text-faint)" }}>
+          Password-only access · no username
+        </div>
+      </form>
     </div>
   );
 }
